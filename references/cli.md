@@ -1,6 +1,6 @@
 # CLI 与运行环境
 
-仅在需要运行脚本、配置接口或排查环境时读取。本 Skill 只输出深度文章 HTML/Markdown；入口始终是 `scripts/run.py`，不要直接调用内部共享模块 `distill.py`。
+仅在需要运行脚本、配置接口或排查环境时读取。本 Skill 只输出深度文章 HTML；入口始终是 `scripts/run.py`，不要直接调用内部共享模块 `distill.py`。
 
 ## 安装与预检
 
@@ -30,26 +30,23 @@ LLM 配置优先级：环境变量、显式配置文件、ccswitch 当前 Codex 
 # 深度文章 HTML；默认执行研究、写作、主编审校
 $PY "$SKILL_ROOT/scripts/run.py" <URL> -o article
 
-# 同时输出 HTML 与 Markdown
-$PY "$SKILL_ROOT/scripts/run.py" <URL> --both -o article
-
 # PDF、Word 或本地正文
-$PY "$SKILL_ROOT/scripts/run.py" report.pdf --both -o article
-$PY "$SKILL_ROOT/scripts/run.py" report.docx --both -o article
-$PY "$SKILL_ROOT/scripts/run.py" --from-text raw.md --title "标题" --both -o article
+$PY "$SKILL_ROOT/scripts/run.py" report.pdf -o article
+$PY "$SKILL_ROOT/scripts/run.py" report.docx -o article
+$PY "$SKILL_ROOT/scripts/run.py" --from-text raw.md --title "标题" -o article
 
 # 无 LLM 配置时先生成 prompt 包，之后渲染深度文章
 $PY "$SKILL_ROOT/scripts/run.py" <URL> --source-only -o pack.json
-$PY "$SKILL_ROOT/scripts/run.py" --render pack.json distilled.json --both -o article
+$PY "$SKILL_ROOT/scripts/run.py" --render pack.json distilled.json -o article
 
 # 回灌浏览器发现的来源和媒体
-$PY "$SKILL_ROOT/scripts/run.py" <URL> --page-assets page-assets.json --both -o article
+$PY "$SKILL_ROOT/scripts/run.py" <URL> --page-assets page-assets.json -o article
 
 # 显式补充官方和独立来源
 $PY "$SKILL_ROOT/scripts/run.py" <URL> \
   --official-url <OFFICIAL_URL> \
   --independent-url <INDEPENDENT_URL> \
-  --both -o article
+  -o article
 
 # 可选解释配图
 $PY "$SKILL_ROOT/scripts/run.py" <URL> --article-images generate \
@@ -58,7 +55,7 @@ $PY "$SKILL_ROOT/scripts/run.py" <URL> --article-images generate \
 
 ## 关键参数
 
-- `--both`：输出 HTML 和 Markdown；`--md` 只输出 Markdown。深度版不接受 `--format`。
+- 输出固定为一个 `.html` 文件；深度版不接受额外输出格式参数。
 - `--source-only`：只抓取材料并生成 prompt 包，不调用 LLM。
 - `--render PACK DISTILLED`：使用已有材料包和解读 JSON 渲染，仍执行确定性证据与质量门禁。
 - `--page-assets FILE`：合并浏览器导出的来源与媒体清单；候选链接仍须成功读取后才算证据。
@@ -73,20 +70,18 @@ $PY "$SKILL_ROOT/scripts/run.py" <URL> --article-images generate \
 - `--skip-editorial-review`：保留研究和写作，跳过主编审校。
 - `--single-pass`：只调用一次写作模型，与 `--skip-editorial-review` 互斥。
 - `--stage-cache-dir`、`--no-stage-cache`：指定或关闭来源与模型阶段缓存。
-- `--no-index`：不查询或更新用户运行时概念索引。
-- `--gen-skill`：把本文知识体系写入用户运行时数据目录。
 
 ## 缓存与运行时数据
 
-默认用户数据目录为 `~/.article-distiller/`，可用 `ARTICLE_DISTILLER_DATA_DIR` 覆盖。概念索引、领域知识包和可选信息源清单都写入该目录，不写回 Skill 安装目录，也不依赖某台电脑的绝对路径。
+默认用户数据目录为 `~/.article-distiller/`，可用 `ARTICLE_DISTILLER_DATA_DIR` 覆盖。可选信息源清单写入该目录，不写回 Skill 安装目录，也不依赖某台电脑的绝对路径。
 
 模型请求默认流式返回并有限重试。来源快照与阶段缓存默认有效 24 小时；网页正常抓取时始终以最新正文计算指纹，只有同一 URL 抓取失败时才恢复有效期内的真实材料快照。
 
 ## 维护验证
 
 ```bash
-$PY "$SKILL_ROOT/scripts/release_check.py" --source-root "$SKILL_ROOT" --with-tests
+$PY "$SKILL_ROOT/scripts/release_check.py" --source-root "$SKILL_ROOT"
 $PY /path/to/skill-creator/scripts/quick_validate.py "$SKILL_ROOT"
 ```
 
-发布检查必须验证：依赖清单、无个人绝对路径、深度版入口、空白运行时索引、Python 编译、核心行为测试和独立解包冒烟测试。
+安装包自检必须验证：依赖清单、无个人绝对路径、深度版入口、Python 编译和独立解包冒烟测试。源码仓库发布前另运行 `release_check.py --with-tests`，覆盖 `tests/` 中的核心行为回归；测试代码不进入发布 ZIP。

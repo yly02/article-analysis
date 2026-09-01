@@ -101,7 +101,7 @@
 }
 ```
 
-规范化器以媒体注册表覆盖曲目 URL、来源、提示词和歌词，写入 `registered`。缺少登记音频、真实章节锚点、提示词、听感重点或证据边界时，严格发布被阻止。HTML 切换曲目时暂停其他音频；Markdown 降级为官方音频链接、提示词和要点列表。
+规范化器以媒体注册表覆盖曲目 URL、来源、提示词和歌词，写入 `registered`。缺少登记音频、真实章节锚点、提示词、听感重点或证据边界时，严格发布被阻止。HTML 切换曲目时暂停其他音频，无脚本时展开真实音频链接、提示词和要点列表。
 
 成稿的 `source_media[]` 只能引用这个注册表中的 `media_id` 或 URL，并提供 `caption` 与真实的 `after_section_id`。原文素材登记为 `original_media`；实际抓取附件中的素材按来源角色登记。规范化器会覆盖 URL、类型和来源，写入 `registered`；未登记、重复或锚点无效的媒体会阻止严格发布。渲染器只显示 `registered:true` 的项目。媒体属于来源素材，不提升事实主张的独立证据等级。
 
@@ -145,7 +145,7 @@
 
 ## 原始证据图库
 
-`evidence_gallery[]` 只引用已登记媒体。规范化器会自动合并显式图库、正文 `source_media` 和数字故事的 `source_asset_ids`，按规范化 URL 去重。HTML 与 Markdown 均默认折叠展示缩略图、说明、原始文件和来源页面。OCR 的 `source_label` 与 `ocr_confidence` 只用于追踪线索，不改变 verdict、`evidence_status` 或独立覆盖率。
+`evidence_gallery[]` 只引用已登记媒体。规范化器会自动合并显式图库、正文 `source_media` 和数字故事的 `source_asset_ids`，按规范化 URL 去重。HTML 默认折叠展示缩略图、说明、原始文件和来源页面。OCR 的 `source_label` 与 `ocr_confidence` 只用于追踪线索，不改变 verdict、`evidence_status` 或独立覆盖率。
 
 ## 汇总
 

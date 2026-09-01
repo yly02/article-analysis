@@ -50,7 +50,7 @@
 
 ```bash
 python <skill-root>/scripts/run.py <URL> \
-  --page-assets page-assets.json --both -o article
+  --page-assets page-assets.json -o article
 ```
 
 支持的顶层集合：

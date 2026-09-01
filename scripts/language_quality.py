@@ -269,6 +269,20 @@ STIFF_PHRASES = (
     "随着人工智能的快速发展",
 )
 
+REDUNDANT_DATE_PAREN_RE = re.compile(
+    r"(?P<iso>(?P<iso_year>\d{4})-(?P<iso_month>\d{2})-(?P<iso_day>\d{2}))"
+    r"\s*[（(]\s*(?P<cn_year>\d{4})\s*年\s*(?P<cn_month>\d{1,2})\s*月\s*"
+    r"(?P<cn_day>\d{1,2})\s*日\s*[）)]"
+)
+
+
+def _same_date_formats(match: re.Match[str]) -> bool:
+    return (
+        match.group("iso_year") == match.group("cn_year")
+        and int(match.group("iso_month")) == int(match.group("cn_month"))
+        and int(match.group("iso_day")) == int(match.group("cn_day"))
+    )
+
 
 def _path_text(path: tuple[str | int, ...]) -> str:
     result = "$"
@@ -313,6 +327,21 @@ def find_language_issues(distilled: dict) -> list[dict]:
     for path, value in _walk_text(distilled):
         path_text = _path_text(path)
         for fragment in _unprotected_fragments(value):
+            for match in REDUNDANT_DATE_PAREN_RE.finditer(fragment):
+                if not _same_date_formats(match):
+                    continue
+                key = (path_text, "redundant_date_parenthesis", match.group(0))
+                if key not in seen:
+                    seen.add(key)
+                    issues.append({
+                        "path": path_text,
+                        "rule": "redundant_date_parenthesis",
+                        "judgment": "明确病句",
+                        "category": "成分赘余",
+                        "message": "同一日期使用两种等价格式重复括注，只保留一种即可",
+                        "text": match.group(0),
+                        "auto_fixable": True,
+                    })
             for rule in RULES:
                 for match in rule.pattern.finditer(fragment):
                     key = (path_text, rule.code, match.group(0))
@@ -443,7 +472,19 @@ def _fix_unprotected(text: str, path: str, fixes: list[dict]) -> str:
 
 
 def _fix_fragment(fragment: str, path: str, fixes: list[dict]) -> str:
-    result = fragment
+    def collapse_date(match: re.Match[str]) -> str:
+        if not _same_date_formats(match):
+            return match.group(0)
+        replacement = match.group("iso")
+        fixes.append({
+            "path": path,
+            "rule": "redundant_date_parenthesis",
+            "before": match.group(0),
+            "after": replacement,
+        })
+        return replacement
+
+    result = REDUNDANT_DATE_PAREN_RE.sub(collapse_date, fragment)
     for rule in RULES:
         if rule.replacement is None:
             continue

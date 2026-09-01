@@ -13,7 +13,7 @@ from typing import Any, Iterable
 from language_quality import analyze_reader_voice, find_language_issues
 
 
-OUTPUT_MODES = {"full", "onepager", "cards"}
+OUTPUT_MODES = {"full"}
 PLACEHOLDER_VALUES = {"内容", "正文", "待补充", "暂无", "省略", "todo", "tbd", "...", "…"}
 UNKNOWN_NUMBER_VALUES = {"未知", "不详", "未提供", "材料未提供", "无明确对照", "unknown", "n/a", "na"}
 META_NARRATION_RE = re.compile(
@@ -499,22 +499,17 @@ def _public_path(path: tuple[str | int, ...]) -> str:
 def _semantic_corpus(distilled: dict, mode: str) -> str:
     """Return publish-facing copy only; audit notes and research ledgers are excluded."""
     selected: list[Any] = [distilled.get("distilled_title")]
-    if mode == "full":
-        selected.extend((
-            distilled.get("quick_scan"),
-            distilled.get("sections"),
-            distilled.get("experiment_ledger"),
-            distilled.get("case_stories"),
-            distilled.get("number_stories"),
-            distilled.get("listening_cards"),
-            distilled.get("visuals"),
-            distilled.get("action_card"),
-            distilled.get("takeaway_list"),
-        ))
-    elif mode == "onepager":
-        selected.append(distilled.get("one_pager"))
-    elif mode == "cards":
-        selected.append(distilled.get("card_deck"))
+    selected.extend((
+        distilled.get("quick_scan"),
+        distilled.get("sections"),
+        distilled.get("experiment_ledger"),
+        distilled.get("case_stories"),
+        distilled.get("number_stories"),
+        distilled.get("listening_cards"),
+        distilled.get("visuals"),
+        distilled.get("action_card"),
+        distilled.get("takeaway_list"),
+    ))
     return "\n".join(text for item in selected for text in _flatten_visible_text(item))
 
 
@@ -697,7 +692,7 @@ def _audit_claim_against_corpus(claim_id: str, claim_text: str, corpus: str) -> 
 def semantic_claim_coverage(
     distilled: dict,
     research: dict,
-    required_modes: Iterable[str] = ("full", "onepager", "cards"),
+    required_modes: Iterable[str] = ("full",),
 ) -> dict:
     """Deterministic lexical-semantic coverage check for high-priority claims.
 
@@ -749,7 +744,7 @@ def semantic_claim_coverage(
 def audit_distilled(
     distilled: dict,
     research: dict | None = None,
-    required_modes: Iterable[str] = ("full", "onepager", "cards"),
+    required_modes: Iterable[str] = ("full",),
     strict_editorial: bool = False,
     semantic_coverage_strict: bool | None = None,
 ) -> dict:
@@ -1086,123 +1081,6 @@ def audit_distilled(
         if question_dense_sections:
             warnings.append(
                 f"正文部分章节连续抛出三个以上问题，建议先回答再推进：{question_dense_sections}"
-            )
-
-    if "onepager" in modes:
-        onepager_present = isinstance(distilled.get("one_pager"), dict) and bool(distilled.get("one_pager"))
-        onepager = distilled.get("one_pager") if onepager_present else {}
-        op_sections = [x for x in _list(onepager.get("key_sections")) if isinstance(x, dict)]
-        usable_op = [x for x in op_sections if _text(x.get("subtitle")) and _text(x.get("content"))]
-        op_duplicates = _duplicate_pairs(usable_op, "subtitle", "content")
-        placeholder_op = [
-            i + 1 for i, x in enumerate(op_sections)
-            if _is_placeholder(x.get("subtitle")) or _is_placeholder(x.get("content"))
-        ]
-        onepager_chars = _char_count(
-            onepager.get("lead"),
-            *[x.get("subtitle") for x in usable_op],
-            *[x.get("content") for x in usable_op],
-        )
-        metrics.update({
-            "onepager_section_count": len(usable_op),
-            "onepager_char_count": onepager_chars,
-            "duplicate_onepager_sections": op_duplicates,
-            "placeholder_onepager_sections": placeholder_op,
-        })
-        legacy_fallback = not strict_editorial and not onepager_present and len(base_usable_sections) >= 3
-        if legacy_fallback:
-            warnings.append("旧 JSON 缺少 one_pager，将从完整正文兼容合成")
-        else:
-            if not _text(onepager.get("lead")):
-                blockers.append("一页纸缺少 lead")
-            if len(usable_op) < 3:
-                blockers.append(f"一页纸只有 {len(usable_op)} 个有效小节，至少需要 3 个")
-        if len(usable_op) > 5:
-            warnings.append(f"一页纸有 {len(usable_op)} 个小节，建议压缩到 3–5 个")
-        if onepager_present and onepager_chars < 450:
-            (blockers if strict_editorial else warnings).append(
-                f"一页纸只有 {onepager_chars} 字，低于有效短稿下限 450 字"
-            )
-        elif onepager_chars < 500:
-            warnings.append(f"一页纸只有 {onepager_chars} 字，建议达到 500–800 字")
-        if onepager_chars > 900:
-            (blockers if strict_editorial else warnings).append(
-                f"一页纸有 {onepager_chars} 字，超过一页纸上限 900 字"
-            )
-        elif onepager_chars > 800:
-            warnings.append(f"一页纸有 {onepager_chars} 字，建议压缩到 500–800 字")
-        if op_duplicates:
-            blockers.append(f"一页纸存在高度重复小节：{op_duplicates}")
-        if placeholder_op:
-            blockers.append(f"一页纸存在占位内容：{placeholder_op}")
-
-    if "cards" in modes:
-        deck_present = isinstance(distilled.get("card_deck"), dict) and bool(distilled.get("card_deck"))
-        deck = distilled.get("card_deck") if deck_present else {}
-        cards = [x for x in _list(deck.get("cards")) if isinstance(x, dict)]
-        usable_cards = [x for x in cards if _text(x.get("title")) and (_text(x.get("body")) or _list(x.get("nodes")) or _list(x.get("steps")))]
-        card_duplicates = _duplicate_pairs(usable_cards, "title", "body")
-        placeholder_cards = [
-            i + 1 for i, x in enumerate(cards)
-            if _is_placeholder(x.get("title")) or _is_placeholder(x.get("body"))
-        ]
-        allowed_source_statuses = {"source_only", "cross_checked", "disputed", "unknown"}
-        missing_card_claims = [
-            i + 1 for i, x in enumerate(cards)
-            if not _claim_ids(_list(x.get("claim_ids")))
-        ]
-        invalid_card_statuses = [
-            i + 1 for i, x in enumerate(cards)
-            if _text(x.get("source_status")).lower() not in allowed_source_statuses
-        ]
-        unknown_card_claim_ids = sorted({
-            claim_id
-            for card in cards
-            for claim_id in _claim_ids(_list(card.get("claim_ids")))
-            if research_claim_ids and claim_id not in research_claim_ids
-        })
-        metrics.update({
-            "card_count": len(usable_cards),
-            "duplicate_cards": card_duplicates,
-            "placeholder_cards": placeholder_cards,
-            "cards_missing_claim_ids": missing_card_claims,
-            "cards_invalid_source_status": invalid_card_statuses,
-            "unknown_card_claim_ids": unknown_card_claim_ids,
-        })
-        legacy_fallback = (
-            not strict_editorial
-            and not deck_present
-            and len(base_usable_sections) + len(base_quick_scan) >= 4
-        )
-        if legacy_fallback:
-            warnings.append("旧 JSON 缺少 card_deck，将从正文与速览兼容合成")
-        else:
-            if not _text(deck.get("cover_hook")):
-                blockers.append("卡片版缺少 cover_hook")
-            if len(usable_cards) < 4:
-                blockers.append(f"卡片版只有 {len(usable_cards)} 张有效内容卡，至少需要 4 张")
-            elif len(usable_cards) < 6:
-                (blockers if strict_editorial else warnings).append(
-                    f"卡片版只有 {len(usable_cards)} 张内容卡，需要 6–9 张"
-                )
-            if len(usable_cards) > 9:
-                (blockers if strict_editorial else warnings).append(
-                    f"卡片版有 {len(usable_cards)} 张内容卡，需要压缩到 6–9 张"
-                )
-        if card_duplicates:
-            blockers.append(f"卡片版存在高度重复内容卡：{card_duplicates}")
-        if placeholder_cards:
-            blockers.append(f"卡片版存在占位内容：{placeholder_cards}")
-        if missing_card_claims:
-            target = blockers if strict_editorial and research_claim_ids else warnings
-            target.append(f"内容卡缺少 claim_ids：{missing_card_claims}")
-        if invalid_card_statuses:
-            (blockers if strict_editorial else warnings).append(
-                f"内容卡缺少合法 source_status：{invalid_card_statuses}"
-            )
-        if unknown_card_claim_ids:
-            (blockers if strict_editorial else warnings).append(
-                f"内容卡引用了不存在的研究 claim id：{unknown_card_claim_ids}"
             )
 
     high_ids = {
@@ -1955,7 +1833,7 @@ def choose_preferred(
     draft: dict,
     revised: dict,
     research: dict | None = None,
-    required_modes: Iterable[str] = ("full", "onepager", "cards"),
+    required_modes: Iterable[str] = ("full",),
     strict_editorial: bool = True,
 ) -> tuple[dict, str, dict, dict]:
     """选择确定性质量更好的版本；分数相同时优先审校后的版本。"""

@@ -5,7 +5,7 @@ v6 升级（融文风格 + 目录导航）：
 - 新增目录导航卡（toc-card）：可点击跳转到各段落，smooth scroll
 - 新增推荐理由行（rec-reason）：一句话说明为什么值得读
 - 事实核查保留在数据层，页面只显示统一资料区
-- 保留主题切换 / 目录导航 / 相关文章互链
+- 保留主题切换与目录导航
 - 向后兼容旧 JSON（one_liner + key_points 自动合成，无 recommendation_reason 不报错）
 CSS/JS 全内联，浏览器直开可看，不依赖任何第三方库。
 """
@@ -2396,7 +2396,7 @@ def _render_evidence_gallery(items: list) -> str:
 # ── 主渲染函数 ─────────────────────────────────────────────
 
 
-def render_html(article: Article, distilled: dict, related: list | None = None) -> str:
+def render_html(article: Article, distilled: dict) -> str:
     d_title = distilled.get("distilled_title") or "AI \u84B8\u998F\u89E3\u8BFB"
     one_liner = distilled.get("one_liner") or ""
     category_tags = distilled.get("category_tags") or []

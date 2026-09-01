@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-"""Build the standalone deep-article Skill package.
-
-The shared source tree keeps compatibility code for sibling Skills, but this
-manifest deliberately excludes onepager/cards renderers and XHS-only assets.
-"""
+"""Build the standalone deep-article Skill package."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import zipfile
 from pathlib import Path
 
 
 FILES = [
     "SKILL.md",
+    "README.md",
     "requirements.txt",
+    "examples/workflows.md",
+    "examples/casebook.md",
     "references/article-depth.md",
     "references/article-imagegen.md",
     "references/chinese-grammar-review.md",
@@ -30,7 +28,6 @@ FILES = [
     "scripts/article_imagegen.py",
     "scripts/chart_ocr.py",
     "scripts/chart_ocr.swift",
-    "scripts/concept_index.py",
     "scripts/config.example.json",
     "scripts/check_environment.py",
     "scripts/dependency_bootstrap.py",
@@ -42,7 +39,6 @@ FILES = [
     "scripts/fetcher.py",
     "scripts/file_ingest.py",
     "scripts/language_quality.py",
-    "scripts/md_renderer.py",
     "scripts/media_audit.py",
     "scripts/package_skill.py",
     "scripts/renderer.py",
@@ -50,13 +46,8 @@ FILES = [
     "scripts/runtime_paths.py",
     "scripts/run.py",
     "scripts/release_check.py",
-    "scripts/skill_generator.py",
     "scripts/source_registry.py",
 ]
-
-GENERATED_FILES = {
-    "data/concept_index.json": json.dumps({"concepts": {}, "articles": []}, ensure_ascii=False, indent=2) + "\n",
-}
 
 
 def build(source_root: Path, output: Path) -> None:
@@ -68,11 +59,9 @@ def build(source_root: Path, output: Path) -> None:
         for relative in FILES:
             path = source_root / relative
             archive.write(path, Path("article-distiller") / relative)
-        for relative, payload in GENERATED_FILES.items():
-            archive.writestr(str(Path("article-distiller") / relative), payload)
     with zipfile.ZipFile(output) as archive:
         names = set(archive.namelist())
-        required = {f"article-distiller/{relative}" for relative in [*FILES, *GENERATED_FILES]}
+        required = {f"article-distiller/{relative}" for relative in FILES}
         if not required.issubset(names):
             raise SystemExit("压缩包缺少清单文件")
 

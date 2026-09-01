@@ -1,10 +1,8 @@
 """LLM 解读模块：把原文喂给大模型，输出结构化解读 JSON。
 
 v9.11：三阶段质量链、补丁式主编审校、PDF/Word 本地输入、流式 LLM、来源快照和可恢复检查点。
-在 v6 基础上新增 one_pager、card_deck 和 editorial_quality 三类数据，默认通过研究、写作、编辑审校三阶段产出三态内容。
-输出结构化 JSON：一分钟速览 / 推荐理由 / 来源声明 / 论点式段落 /
-融文比方·概念·原文对照 / 资料与边界 / 上手卡 / 带走清单 / 可视化 /
-一页纸（新闻导语+短段落+参考链接）/ 图文卡片（封面+内容卡+总结+标签）。
+默认通过研究、写作、编辑审校三阶段产出深度文章结构化 JSON。
+输出包含一分钟速览、论点式段落、证据边界、行动建议和可视化。
 
 使用 OpenAI 兼容接口，因此 DeepSeek / 智谱 / 通义 / Kimi 等国内模型均可直接用。
 配置优先级：环境变量 > config.json > 默认值。
@@ -28,265 +26,11 @@ from editorial_quality import assert_publishable, audit_distilled, choose_prefer
 from language_quality import apply_safe_language_fixes
 
 
-SYSTEM_PROMPT = """你是一名"AI 蒸馏解读"编辑，风格参照"小互·AI解读站"。任务：把用户给的网页原文，二次解读成一篇结构化、可信、易读、可行动的解读稿。
-
-核心原则：
-- No fluff：不复述原文，蒸馏出信息密度最高的解读
-- Sources checked：对关键论断做事实核查标注
-- 证据优先：没有来源链接或逐字引文时，不得写“确认”；只能写“原文声称/无法核实”
-- 范围锁定：不得把其他产品、价格、功能、发布日期或模型名称带入本文，除非原文或 evidence 明确提供
-- 不假设读者懂行话，但也不降低信息密度——用"打个比方""概念解释"降低理解门槛
-- 连贯优先：先确定“中心问题 → 关键判断 → 证据与限制 → 最终回答”的叙事弧线，再写各段；相邻段落必须有因果、递进、转折或问题回答关系
-- 完整覆盖：研究账本中的 high 主张必须写入正文，或在 editorial_coverage 中说明为什么舍弃；不得因为追求短而漏掉限制条件、反例和不确定项
-
-严格输出以下 JSON（不要输出 JSON 以外的任何文字，不要用 markdown 代码块包裹）：
-{
-  "distilled_title": "从真实人物、动作、冲突或结果中提炼的营销标题；先争取点击，再由正文兑现，不编造事实",
-  "one_liner": "首屏导语；事件型材料用 1-2 句交代谁、何时、何地、做了什么、结果怎样",
-  "category_tags": ["3-5 个用于归档的短标签；优先主体、产品家族、技术领域、应用领域或发布类型，每个中文标签 2-8 字，纯英文不超过 12 字符"],
-  "quick_scan": [
-    "要点1：核心变化或机制",
-    "要点2：对用户、行业或工作流的意义",
-    "要点3：最重要的证据边界"
-  ],
-  "recommendation_reason": "推荐理由：一句话说明这篇文章为什么值得读。不是内容摘要，而是'为什么你现在应该花3分钟看这篇'。要有信息增量，如'把湿实验命中率与行业常规10-15%对比，Claude从零设计蛋白结合体的效率已接近专家水平'。",
-  "source_bias_declaration": "页末来源声明：谁写的、利益相关方、口径局限、样本大小等；不要用它代替正文开场。",
-  "narrative_plan": {
-    "title_contract": {"recognition_anchor": "必须逐字进入标题前半句的一个高认知主体常用名；没有才填最具体对象", "click_reason": "唯一冲突、反差、结果或数字", "reader_promise": "标题承诺解释什么", "evidence_guardrail": "标题不能越过的事实边界"},
-    "opening_anchor": "来自已读取材料、用于启动文章的真实小事、人物动作、反常结果或数字；没有合适锚点就写直接陈述事实",
-    "opening_sequence": {"scene": "一到三个真实细节", "turn": "共同暴露的矛盾或反差", "reveal": "主体、时间、动作与核心机制"},
-    "reader_stake": "这件事具体影响目标读者哪一种判断、选择、成本或机会",
-    "resonance_basis": "文章依靠哪项已核实处境、冲突、取舍或后果建立共鸣，以及它的材料依据",
-    "stance": "编辑站在哪个可辩护判断上、依据是什么、什么条件会改变判断",
-    "central_question": "全文要回答的一个核心问题",
-    "short_answer": "先给读者的简短答案",
-    "section_logic": ["第1段建立什么", "第2段为何承接第1段", "第3段怎样收束"],
-    "chapter_system": {"archetype": "event|investigation|product|research|multi-theme|explainer", "throughline": "章节共同推进的主线动作", "chapters": [{"section_id": "对应 section id", "role": "进入|发现|解释|举证|转折|后果|选择|收束", "reader_need": "本节解决的理解缺口", "advance": "相对上一节新增什么", "evidence": "关键材料", "handoff": "下一节为何必须出现；没有则留空"}]},
-    "closing_answer": "结尾如何完整回答 central_question"
-  },
-  "sections": [
-    {
-      "id": "稳定 ASCII 段落标识，如 mechanism 或 evidence-boundary；全文唯一",
-      "tag": "内部定位用关键词分类（2-4字，不在目录或正文标题展示）",
-      "title": "核心章节优先使用读者会问的具体问题；必须能由本节材料直接回答，不能是空泛分类或悬念",
-      "content": "正文段落：前 1-2 句先直接回答标题问题，再展开证据、原因和边界；不复述原文，不把答案拖到末尾。",
-      "transition_hook": "可选：承接本节并由下一节立即回答的自然追问；没有合适问题时留空",
-      "analogies": [
-        {"concept": "原文里的技术概念", "analogy": "用日常生活类比解释这个概念，如'码字像是把录音先转成MP3再交给人'"}
-      ],
-      "concept_explainers": [
-        {"term": "术语名", "definition": "一句话定义", "analogy": "生活类比，如'像进园区时贴在身上的通行贴纸'"}
-      ],
-      "archive_original": [
-        {"original": "只有措辞本身不可替代时才收录的逐字原句", "translation": "忠实中文翻译"}
-      ]
-    }
-  ],
-  "experiment_ledger": [
-    {
-      "id": "必须对应 research_ledger.experiments[].id",
-      "title": "论点式实验标题",
-      "after_section_id": "对应 sections[].id",
-      "question": "这组实验具体回答什么问题",
-      "setup": "环境、流程和关键人工条件",
-      "sample": "样本量、轮数或测试次数；材料未给出则写未知",
-      "models": ["原文明确出现的模型"],
-      "metric": "判定标准与指标口径",
-      "result": "结果，保留数字和口径",
-      "control": "对照组或基线；没有则写无明确对照",
-      "limitations": "不能外推到什么结论",
-      "claim_ids": ["支撑这组实验的 research_ledger claim id"]
-    }
-  ],
-  "case_stories": [
-    {
-      "id": "必须对应 research_ledger.cases[].id",
-      "title": "案例标题",
-      "after_section_id": "对应 sections[].id",
-      "source_mode": "reconstruction|quoted",
-      "setup": "案例发生前的状态",
-      "beats": [
-        {"label": "阶段名", "text": "材料明确支持的动作或状态变化", "source_quote": "可选逐字引文"}
-      ],
-      "outcome": "最终发生了什么",
-      "boundary": "这个案例不能证明什么",
-      "claim_ids": ["支撑该案例的 research_ledger claim id"]
-    }
-  ],
-  "fact_check": [
-    {
-      "claim": "原文的关键论断",
-      "verdict": "确认|原文声称|交叉验证|存疑|夸大|无法核实",
-      "note": "理由；如果只有原文来源，必须明确写‘仅能确认原文这样说’",
-      "evidence": [
-        {"url": "真实 URL（必须来自原文 URL 或下方可用来源链接）", "source_type": "original|official|supplemental|independent", "publisher": "发布者", "quote": "支持该主张的短引文", "support": "该来源支持什么"}
-      ]
-    }
-  ],
-  "action_card": {
-    "items": ["实操要点1：链接/命令/数据", "实操要点2：注意事项或门槛"],
-    "code_block": "可选：命令行或代码示例（如需展示，不需要则留空字符串）"
-  },
-  "takeaway_list": [
-    "可做的事1（行动导向，不是观点总结，如'提示词写成结构化文档，不是写长句子'）",
-    "可做的事2",
-    "可做的事3"
-  ],
-  "visuals": [
-    {"type": "compare_table", "title": "图表标题", "after_section_id": "对应 sections[].id", "data": {"layout": "stacked|paired|matrix", "headers": ["主题","对照方案","主方案","限制"], "column_roles": ["neutral","baseline","primary","warning"], "rows": [["...","...","...","..."]]}},
-    {"type": "delta_table", "title": "前后变化标题", "after_section_id": "对应 sections[].id", "reader_question": "同一指标从旧版到新版发生了什么变化", "data": {"baseline_label": "旧版", "current_label": "新版", "rows": [{"label": "准确率", "baseline": "82%", "current": "89%", "change": "+7 个百分点", "direction": "up|down|flat", "tone": "primary|baseline|warning|danger|neutral"}], "boundary": "变化值的计算口径和不能据此推出什么"}},
-    {"type": "status_matrix", "title": "状态覆盖标题", "after_section_id": "对应 sections[].id", "reader_question": "多个对象在各维度分别支持到什么程度", "data": {"columns": ["文本", "音频", "视频"], "rows": [{"label": "模型 A", "cells": [{"value": "支持", "tone": "primary"}, {"value": "有限", "tone": "warning"}, {"value": "未提供", "tone": "neutral"}]}], "caption": "支持、有限、未提供分别如何定义", "boundary": "定性状态不能当作性能分数"}},
-    {"type": "decision_table", "title": "条件与应对标题", "after_section_id": "对应 sections[].id", "reader_question": "不同条件会带来什么结果，读者可以怎么做", "data": {"rows": [{"condition": "来源明确支持的触发条件", "result": "条件发生后的真实结果", "action": "编辑根据结果给出的可执行建议", "tone": "primary|baseline|warning|danger|neutral"}], "boundary": "规则对应的版本、范围和例外；行动建议不冒充来源规则"}},
-    {"type": "metric_bars", "title": "多指标比较标题", "after_section_id": "对应 sections[].id", "data": {"primary_label": "主方案", "baseline_label": "对照系统", "normalization_note": "条长只在同一模型、同一指标内归一化；数字保留原值", "groups": [{"id": "metric-id", "label": "切换标签", "question": "这个指标回答的读者问题", "metric": "指标全名与单位", "better": "higher|lower", "rows": [{"label": "模型或对象", "primary_value": 10, "baseline_value": 5, "primary_display": "10 单位", "baseline_display": "5 单位", "ratio": "2.0×"}]}], "boundary": "不同指标不能合成一个总倍数，以及来源限制"}},
-    {"type": "rank_bars", "title": "单口径数值排名", "after_section_id": "对应 sections[].id", "reader_question": "同一口径下哪些对象数值最高", "data": {"groups": [{"id": "positive", "label": "正向参数", "question": "同一单位下各参数怎样排序", "unit": "权重", "direction": "positive|negative", "tone": "primary|baseline|warning|danger", "rows": [{"label": "对象", "value": 20, "display": "20", "note": "可选说明"}]}], "caption": "条长在每个分组内部按绝对值归一化，数字保留原值。", "boundary": "数值关系的证据口径及不能推出什么"}},
-    {"type": "flow", "title": "流程标题", "after_section_id": "对应 sections[].id", "data": {"presentation": "static|stepper", "steps": [{"label": "阶段名", "title": "这一步做什么", "description": "具体动作与原因", "result": "可选结果"}], "caption": "stepper 必填：步骤关系和不能推出什么"}},
-    {"type": "funnel_flow", "title": "资格逐关收窄", "after_section_id": "对应 sections[].id", "reader_question": "对象在哪几道关口被逐步筛掉", "data": {"entry_label": "进入流程的全部对象", "steps": [{"label": "第一关", "description": "这关判断什么", "exit_label": "哪些对象会被拿掉", "width": 100}, {"label": "第二关", "description": "下一关判断什么", "exit_label": "哪些对象会被拿掉", "width": 72}], "caption": "宽度只表示资格逐级收窄，不代表未经来源支持的精确淘汰比例。"}},
-    {"type": "layer_stack", "title": "多层结构标题", "after_section_id": "对应 sections[].id", "reader_question": "读者要看懂哪种上下层关系", "data": {"layers": [{"label": "应用层", "title": "这一层负责什么", "description": "它怎样连接上下层", "items": ["可选关键组成"]}], "caption": "层级来自哪些材料，以及不能据此推出什么"}},
-    {"type": "stat", "title": "数据图标题", "after_section_id": "对应 sections[].id", "data": {"items": [{"label":"...", "value": 0, "tone": "primary|baseline|warning|danger|留空"}], "unit": ""}},
-    {"type": "timeline", "title": "时间线标题", "after_section_id": "对应 sections[].id", "data": {"presentation": "static|scrubber", "events": [{"time":"...", "title":"节点发生了什么", "description":"为何重要"}], "caption": "scrubber 必填：时间范围和证据边界"}},
-    {"type": "interactive_compare", "title": "机制互动标题", "after_section_id": "对应 sections[].id", "data": {"instruction": "让读者切换什么", "prompt": "可选上下文", "options": [{"label": "候选", "note": "可选说明"}], "modes": [{"label": "模式名", "selected_index": 0, "signal": "模式特征", "note": "为什么得到该结果"}], "takeaway": "切换后应理解的机制", "caption": "机制示意，不代表真实概率、模型输出或检测结果。"}},
-    {"type": "scenario_calculator", "title": "证据情景卡标题", "after_section_id": "对应 sections[].id", "data": {"instruction": "切换对象并调整哪项假设", "tabs": [{"label": "对象 A", "metrics": [{"label": "来源指标", "value": "约 24.6 美元", "note": "口径说明"}]}, {"label": "对象 B", "metrics": [{"label": "来源指标", "value": "约 19.8 美元", "note": "口径说明"}]}], "slider": {"label": "情景假设", "min": 0, "max": 10, "step": 0.5, "value": 4, "prefix": "$"}, "result": {"label": "情景结果", "base": 15.78, "prefix": "$", "decimals": 2}, "source_asset_ids": ["已登记媒体 id"], "formula_note": "来源基数减去读者输入假设；说明哪些量不是同一口径", "caption": "来源数值与读者假设的边界说明。"}},
-    {"type": "capacity_curve", "title": "定性关系标题", "after_section_id": "对应 sections[].id", "reader_question": "变量继续增强时结果如何变化", "data": {"axis_label": "教师相对学生的能力", "result_label": "学生损失（越低越好）", "states": [{"label": "教师偏弱", "position": 0, "result": "学习信号不够丰富", "tone": "warning"}, {"label": "匹配区", "position": 50, "result": "学生较能吸收教师信息", "tone": "primary"}, {"label": "教师过强", "position": 100, "result": "模仿难度重新上升", "tone": "danger"}], "caption": "定性关系；具体匹配点会随学生、数据、架构和方法变化，不是通用预测器。"}},
-    {"type": "cost_ledger", "title": "成本口径标题", "after_section_id": "对应 sections[].id", "reader_question": "不同成本计入方式下结论是否改变", "data": {"cost_labels": ["教师训练", "教师输出"], "scenarios": [{"id": "free", "label": "教师已摊销", "included": [], "verdict": "这是对蒸馏最有利的情形", "explanation": "只比较学生侧新增成本。"}, {"id": "both", "label": "两笔都算", "included": ["教师训练", "教师输出"], "verdict": "结论可能转向监督学习", "explanation": "把教师侧成本一起纳入比较。"}], "boundary": "比较的是材料采用的计算口径，不自动等同于真实费用和时间。"}},
-    {"type": "strategy_tabs", "title": "平行策略标题", "after_section_id": "对应 sections[].id", "reader_question": "多个方案分别改变哪一层问题", "data": {"instruction": "切换方案，查看每项策略怎样起作用", "strategies": [{"label": "方案 A", "target": "作用对象 A", "mechanism": "方案 A 怎样起作用", "expected_effect": "希望带来的变化", "open_questions": "真正落地还缺的条件", "tone": "primary"}, {"label": "方案 B", "target": "作用对象 B", "mechanism": "方案 B 怎样起作用", "expected_effect": "希望带来的变化", "open_questions": "真正落地还缺的条件", "tone": "baseline"}], "boundary": "这些是平行策略，不代表效果已经得到验证。"}}
-  ],
-  "illustration_plan": [
-    {
-      "id": "稳定 ASCII id",
-      "role": "mechanism|workflow|concept|case_context",
-      "title": "解释图标题",
-      "after_section_id": "对应 sections[].id",
-      "purpose": "这张图帮助读者理解什么",
-      "scene": "无文字画面的主体、空间关系和构图",
-      "visual_mapping": [{"element": "画面元素", "meaning": "它对应的正文概念"}],
-      "alt": "无障碍替代文本",
-      "caption": "说明图意，并明确这是 AI 概念示意而非原始证据"
-    }
-  ],
-  "source_media": [
-    {"media_id": "必须对应媒体清单中的 id", "type": "image|video", "url": "必须来自媒体清单", "poster_url": "可选，必须来自清单", "caption": "自然中文图注", "language": "zh|en|其他语言代码", "reader_note": "外语视频的中文观看重点或外语图片的中文读图提示", "translation_note": "可选：真实的翻译、双语字幕或编辑重构说明", "after_section_id": "对应 sections[].id", "source_url": "素材上游来源 URL"}
-  ],
-  "media_omissions": [
-    {"media_id": "未采用的重要演示或首屏视频 id", "reason": "为何它只是装饰、重复或与论证无关；必须具体"}
-  ],
-  "listening_cards": [
-    {"id": "稳定 ASCII id", "title": "试听卡标题", "intro": "为什么要听这几段", "after_section_id": "对应 sections[].id", "boundary": "这些官方样曲能与不能证明什么", "tracks": [{"media_id": "必须对应可用来源媒体中的 audio id", "label": "曲风或能力标签", "prompt": "优先沿用媒体清单中的真实提示词", "lyrics_excerpt": "可选歌词摘录", "listening_points": ["具体听什么变化", "它对应正文哪项能力"]}]}
-  ],
-  "number_stories": [
-    {"id": "稳定 ASCII id", "title": "这个数字回答的问题", "value": "主数字", "unit": "单位", "denominator": "分母或样本总量", "scope": "适用对象与范围", "period": "统计时点或时间段", "baseline": "对照基线", "change": "相对基线如何变化", "boundary": "不能据此推出什么", "source_url": "输入中登记的来源 URL", "source_asset_ids": ["支撑该数字的媒体 id"], "claim_ids": ["对应的 metric claim id"], "after_section_id": "对应 sections[].id", "importance": "high|medium|low", "suppress_visual": false}
-  ],
-  "evidence_gallery": [
-    {"media_id": "已登记媒体 id", "caption": "这张原始证据图展示什么", "claim_ids": ["相关 claim id"]}
-  ],
-  "source_notes": "信息来源与可信度整体说明",
-  "editorial_coverage": {
-    "covered_claim_ids": ["已进入正文或重要输出的研究账本 claim id；无研究账本时留空"],
-    "omitted_claims": [{"id": "未采用的 claim id", "reason": "与主题无关、重复、证据不足或篇幅取舍"}]
-  },
-  "one_pager": {
-    "lead": "新闻导语：2-3句，要有冲突/反转/悬念，吸引点击。不是摘要而是钩子，如'一个 Skill 声称让 V4 Pro 超过 Fable 5，社区复测却彻底翻车'。",
-    "key_sections": [
-      {
-        "subtitle": "加粗小标题（8-15字，论点式不是分类式，如'打假反被删帖'）",
-        "content": "2-4段简短正文，每段2-3句。新闻体，节奏快，不复述原文，直给结论和数据。可以用**加粗**强调关键数字。"
-      }
-    ],
-    "references": [
-      {"title": "链接显示文本", "url": "URL"}
-    ]
-  },
-  "card_deck": {
-    "visual_system": "guizang-editorial|guizang-kraft|guizang-swiss|classic（默认 guizang-editorial；只改变版式，不改变事实）",
-    "layout_plan": ["cover", "content", "data", "statement", "warning", "flow", "system", "takeaway"],
-    "cover_emoji": "一个代表文章主题的emoji（如🔥🧬🤖⚡）",
-    "cover_hook": "封面悬念句（10-20字，要有反转或冲突，可换行用\\n，如'不做最聪明的\\n做最能干活的'）",
-    "cover_sub": "封面副标题（如'左滑看完整解读 →'）",
-    "cover_image_prompt": "可选封面配图概念：只描述无文字场景、主体和构图，不写事实数字或产品界面",
-    "author_name": "作者署名（如'AI课代表'，显示在封面底部，形成个人IP）",
-    "xhs_title": "小红书发帖标题（不是文章标题，要情绪化+第一人称，如'我宣布！这个AI工具真的能替代人？'，不超过20字）",
-    "xhs_body": "小红书发帖正文文案（3-5句话，口语化，引导用户左滑看图，结尾带话题引导。不要太正式，像跟朋友聊天）",
-    "cards": [
-      {
-        "title": "卡片标题（不超过12字，论点式，不要'第X章'这种）",
-        "body": "2-3句核心内容，口语化，直给结论。可以用<b>加粗关键短语</b>",
-        "claim_ids": ["支撑本卡的 research_ledger claim id"],
-        "source_status": "source_only|cross_checked|disputed|unknown，不能高于关联 claim 的证据等级",
-        "highlight": "关键数据或金句（不超过20字）。如果是对抗/对比型数据，用'标签: 数字A vs 数字B'格式，渲染器会自动做成大数据对比卡",
-        "emoji": "卡片emoji（放在标题前，如🎯📊⚠️💡🔥，每个卡片不同）",
-        "image_prompt": "只有适合用概念配图增强时填写：描述无文字画面、主体、场景和构图；数据/流程卡留空",
-        "type": "卡片类型：info(白卡信息) / data(数据对比卡) / alert(警示卡暖橙底) / quote(金句卡紫渐变) / mindmap(放射状思维导图卡，牛皮纸底) / flow(流程节点卡) / handwritten(手写牛皮纸卡，多色高亮词)。不填则自动分配",
-        "nodes": [{"text": "分支名", "subtitle": "English"}],
-        "steps": ["步骤1", "步骤2", "步骤3"],
-        "center": "思维导图中心节点文字（mindmap 类型专用）"
-      }
-    ],
-    "summary": ["总结要点1（10-15字，行动导向）", "总结要点2", "总结要点3"],
-    "tags": ["标签1", "标签2", "标签3（不带#号，3-5个，小红书热门风格如'AI工具''效率神器''打工人必备'）"]
-  }
-}
-
-注意：
-- sections 数组至少 3 个段落；每段必须有全文唯一、稳定的 ASCII id。每个段落可以只填 content，analogies/concept_explainers/archive_original 按需填（某段没有就给空数组 []）。
-- archive_original 默认留空，全文最多 2 条。只有原句措辞本身不可替代、翻译或转述会损失关键含义，或争议性主张需要读者核对措辞时才收录；正文已经讲清的事实、数字、结论和可由来源图表核对的信息不得重复摘引。
-- quick_scan 会在完整文章标题后显示为“一分钟速览”。严格写 3 条，每条 35-60 字、合计不超过 180 字；三条依次提供核心变化、实际意义和证据边界。不得复制章节标题、推荐理由或目录，也不要写成需要横向对照的并列字段。
-- sections 不能是互不相干的要点堆叠：解释型章节优先以具体问题为标题，content 前 1-2 句直接回答，再展开证据、机制和限制；不要用空洞的“此外/值得注意的是”伪造衔接。
-- `sections[].transition_hook` 只在真正需要牵引下一节时使用，全文通常 3-5 处；问题必须承接本节并由下一节立即回答。下一标题可以压缩重述同一疑问，但不能逐字复制；不得连续堆问、制造材料外悬念，最后一节通常留空。
-- 不同 sections、one_pager.key_sections、card_deck.cards 之间不得重复表达同一结论；同一事实可改变表达密度，但不能占用多个位置冒充信息增量。
-- research_ledger 中 importance=high 的 claim 必须出现在 covered_claim_ids，或进入 omitted_claims 并给出具体理由。unknowns 只能作为限制说明，不能改写成确定事实。
-- 如果 research_ledger.experiments 非空，experiment_ledger 必须覆盖其中 importance=high 的实验；完整保留 setup、sample、metric、result、control、limitations，不能只摘最亮眼的数字。
-- 如果 research_ledger.cases 非空，case_stories 必须覆盖其中 importance=high 的案例。source_mode=reconstruction 表示按证据重建事件链，不是逐字对话；source_mode=quoted 时每个引语必须来自研究账本。严禁为增强画面感编造对话、工具调用或结果。
-- experiment_ledger 和 case_stories 的 claim_ids 只能引用 research_ledger 中真实存在的 claim id，并必须用 after_section_id 插入相关论证段。
-- claim_ids 与 experiment/case id 只用于内部审计和覆盖检查，不能在成品文案中解释或面向读者展示。
-- visuals 数组可以留空 []；使用时必须用 after_section_id 指向最相关的 sections[].id，避免图表脱离论证上下文。兼容字段 section_index 为 0-based，section_tag 为 tag 精确值。
-- interactive_compare 只在“同一组候选因模式变化而得到不同结果”是理解核心时使用；至少 2 个 options 和 2 个 modes，selected_index 必须指向真实候选。没有真实概率时不得编造数字，caption 必须说明是机制示意。
-- metric_bars 用于“同一批模型或对象，存在至少两个回答不同问题的数值指标”。先让读者切换问题，每次只显示一个指标组；每组至少 2 行，主方案与对照必须保留原始数值和单位，条长只在同一行内部归一化。better 明确数值越高或越低越好，ratio 用自然语言说明优势方向；不同指标不能合成总倍数。若只是固定列的同口径二维数据，继续使用 compare_table。
-- rank_bars 用于“同一数值口径下，多个对象的大小和排序本身就是重点”。每个分组保持同一单位与正负方向，2至18项按绝对值降序排列，条长只在分组内部归一化，显示值必须保留正负号和原单位。正向与负向参数可分组切换；不能把不同单位、不同时间或不同总体混成一张榜。
-- layer_stack 用于架构层级、能力分层、上下游或“上层依赖下层”的系统关系；按读者理解顺序列出2至7层，每层写清职责和与相邻层的连接。它不用于有先后动作的流程，也不把并列对象伪装成上下级。caption 必须说明层级依据和证据边界。
-- funnel_flow 只用于对象经过2至5道真实资格关口、候选范围逐级收窄的机制。每关写清判断和可选的淘汰对象；宽度仅表达“越来越少”，没有真实转化率时不得用宽度暗示精确比例。普通动作顺序继续使用 flow，不能把没有淘汰关系的流程画成漏斗。
-- delta_table 只用于同一指标存在明确时间、版本或调整前后关系时。每行保留旧值、新值、来源支持或可可靠计算的变化值、方向和语义色；不能把两个平级对象伪装成前后变化，也不能凭模糊描述硬算变化。
-- status_matrix 只用于多个对象跨多个固定维度的支持、覆盖或完成状态。columns 为2至6项，每行 cells 数量必须一致；颜色表示固定语义状态，不表示未经材料支持的分数或排名，不能为了丰富页面做彩虹表。
-- decision_table 只用于“条件决定结果，并能给出相应行动”的2至8条规则。condition 与 result 必须来自材料，action 是编辑建议，三者不能混写；普通流程继续用 flow，无条件建议清单继续用 action_card。
-- flow 默认 static。只有3至7个阶段都包含需要读者逐步理解的动作、原因或结果，同时全部展开会形成长墙时，才使用 presentation=stepper；每一步必须有 label、title、description，可选 result，并提供 caption。两步短流程或一眼能看完的流程保持 static。
-- timeline 默认 static。只有3至8个时间节点、读者需要拖动观察阶段变化，而且每个节点都有独立解释时，才使用 presentation=scrubber；每个节点写 time、title、description，并提供 caption。时间只是出处信息或节点很少时保持 static。
-- scenario_calculator 只在来源图表同时提供可比较对象、可靠基数和可解释关系时使用。来源数值保留原口径并登记 source_asset_ids；滑块只能表示读者可调整的情景假设，结果区明确公式，caption 必须区分来源数据、图表读数和假设值。不同总体样本不得伪装成平台独立数据，缺少关键基数时不生成计算器。
-- capacity_curve 只在连续变量存在材料支持的拐点、U形或倒U形关系时使用。用3至5个定性状态解释方向变化，position 只表示阅读顺序，不输出未经核验的精确结果数值；caption 必须明确具体转折点随条件变化且不是通用预测器。
-- cost_ledger 只在“哪些成本、资源或责任被计入”会改变结论时使用。cost_labels 登记1至4个项目，scenarios 保留2至6种真实口径，included 只能引用已登记项目；每个情景写清判断、原因和统一 boundary。读者不需要逐格查数时，用它替代大表格。
-- strategy_tabs 用于2至6个平行方案各自作用于不同对象、机制和限制的场景。读者点击方案后查看作用对象、机制、预期效果与待补条件；它不用于同一方案的时间步骤，也不能把可逐格查询的精确数值表藏进标签页。
-- illustration_plan 可以留空 []。只为空间、材质、尺度、氛围或难以代码化的机制与案例环境规划 1-2 张解释图；流程、层级、时间、对比和因果关系优先使用 HTML/CSS 组件。已有来源图、官方视频或代码化视觉能回答同一问题时不要重复规划。禁止把跑分、价格、日期、产品 UI、真实人物或案例结果交给 AI 图片生成。scene 只描述可见主体与构图，不要求生成文字、数字、Logo、标签或界面；caption 必须注明“AI 概念示意，不是原始证据”。
-- source_media 只能选择“可用来源媒体”中登记的 media_id 和 URL；图片/视频必须用 after_section_id 放回相关论证段。来源媒体可以展示产品状态、演示或官方图表，但不能自动证明厂商的性能结论。若登记媒体中存在能直接展示中心能力的官方演示视频，至少选择一段真正帮助理解的视频；多个视频按各自说明的问题分散到相关章节，不能集中堆在文末，也不能为了数量加入重复或装饰性片段。
-- 采用外语图片或视频时，caption 必须改写成准确、自然的中文，language 写明原始语言，并用 reader_note 告诉读者具体看什么、它怎样帮助理解正文。translation_note 只说明真实发生的翻译、双语字幕或编辑重构，不得声称制作了并不存在的字幕；不理解画面内容时不编造翻译。英文图表能可靠还原数据时优先重构为中文 HTML 组件并把原图留在证据图库，不能可靠还原时保留原图并提供中文读图提示。
-- 视频必须带来正文无法替代的信息增量：让读者看见产品操作、实验过程、前后差异、人物关键表述或机制变化。只有气氛、口号、循环文字、品牌片头或正文已经讲清的视觉重复，即使位于原网页首屏也默认放入 media_omissions，不进入正文。
-- 对媒体清单中每个 asset_role=demo 或 hero 的视频逐一作出决定：采用时放进 source_media；不采用时放进 media_omissions，并写清它为何只是装饰、与正文重复或与中心论证无关。不得用“省略”“不需要”等空理由，也不得静默遗漏。
-- 原文或官方附件提供已登记 audio 时，优先生成 1-2 个 listening_cards，把差异明显且直接支撑正文的样曲组织成“真实提示词 + 播放器 + 具体听感重点”。每条 track 只能引用音频 media_id，不自行填写或改写 URL；prompt 优先逐字沿用抓取清单，listening_points 必须描述可听见的节奏、音色、结构、语言或编辑变化，不能写“效果很好”。官方精选样曲只能展示能力范围，boundary 必须说明它不是随机样本、独立盲测或普遍质量保证。没有登记音频时留空 []，不得补外链或虚构试听。
-- research_ledger 中 importance=high 且 claim_kind=metric 的主张必须进入 number_stories。每个数字故事必须保留主数字、单位、分母、时间、对照或变化、适用范围、证据边界和登记来源；缺一项就按普通正文表达，不得做成醒目的大数字卡。“未知”“未提供”不能当作口径已补齐。
-- number_stories 首先是高优先级数字主张的内部审计结构，不等于每条都要公开渲染。数字卡默认使用 display_variant=compact；只有数字本身就是文章核心结论，且读者必须同时查看统计对象、时间、对照和变化才能理解时，才允许展开完整数字卡。辅助背景数字即使 importance=high 也保持 compact，正文或其他视觉已经说清时设置 suppress_visual=true。同一章节最多公开一张真正承担论证任务的数字卡，禁止把内部审计字段铺成长图。可用一句自然的 display_note 说明口径，不要公开展示“无明确对照、无可计算变化”等内部空值。
-- evidence_gallery 只收录有论证价值的已登记原始媒体，优先官方图表、实验截图和关键案例证据；不要放装饰图。相同 URL 只保留一次。
-- 如果原文有视频、图片或截图，只在画面本身有助于解释时纳入 source_media，并在相邻正文自然引出画面说明；不要出现“未来会支持媒体提取”之类生成器过程话术。
-- one_pager.key_sections 选 3-5 个最核心的点，不要和正文 sections 一一对应，是重新组织的新闻体短文。总字数控制在 500-800 字。
-- one_pager.references 从原文和 fact_check 中提取真实的外部链接。
-- fact_check.evidence 只能使用原文 URL 或“可用来源链接”中的 URL，不得编造新链接；没有外部来源时 verdict 不得写“交叉验证”。
-- 所有关键数字、竞品比较、价格、发布日期、性能结论必须能在 evidence 中找到来源；找不到就降级为“原文声称”或“无法核实”。
-- card_deck.cards 选 6-9 张卡片，每张卡片是独立信息单元，截图后单独看也能懂。body 口语化，不要书面语。
-- card_deck.visual_system 只能从 guizang-editorial / guizang-kraft / guizang-swiss / classic 中选择。默认使用 guizang-editorial：纸张底、杂志衬线标题、细线、克制阴影和 3:4 卡片比例。
-- card_deck.layout_plan 先规划封面、正文、数据、声明/金句、警示、流程、系统图、总结的节奏；不要连续 3 张相同角色，也不要所有卡片都使用 info。
-- cover_image_prompt 和 cards[].image_prompt 只负责视觉隐喻，不是新证据。最多为 2 张内容卡填写 image_prompt；禁止要求图片生成文字、数字、跑分、价格、日期、Logo 或产品界面，避免生成图伪装成事实截图。
-- card_deck.cards 的 emoji 每张卡不同，用表情包做视觉锚点（如🎯📊⚠️💡🔥🚀🤔✅）。
-- card_deck.cards 的 type 字段可选：info(白卡) / data(条形图对比) / alert(警示) / quote(金句) / mindmap(放射思维导图) / flow(流程节点图) / handwritten(手写多色高亮)。合适的 section 用 mindmap/flow/handwritten 增强视觉。
-- card_deck.cards 的 mindmap 类型需要 nodes: [{"text": "中文", "subtitle": "English短词"}]，3-8 个分支，center 是中心文字。
-- card_deck.cards 的 flow 类型需要 steps: ["步骤1", "步骤2"...], 2-6 步。
-- card_deck.cards 的 handwritten 类型：body 写三五句话内嵌关键短语，渲染器会按多色循环高亮。
-- card_deck.cards 的 highlight 如果是 '标签: 数字A vs 数字B' 格式，渲染器会自动做成超大数字对比卡。
-- card_deck.xhs_title 是小红书发帖标题，要情绪化、有反转，不是文章原标题。参考：'我宣布！''终于有人说明白了''刷到就是赚到''别再被忽悠了'。
-- card_deck.xhs_body 是发帖正文，口语化，3-5句，引导用户左滑看图。
-- card_deck.tags 是小红书风格的标签，不带#号，3-5个，用热门词（'AI工具''效率神器''打工人必备'等）。
-- card_deck.cover_hook 可以用 \\n 换行做成两行标题，更有冲击力。
-"""
-
-
 _COMMON_MODE_RULES = """共同规则：
 - 只使用原文、已抓取证据材料和研究账本；不得新增材料外的事实、URL、数字、产品、价格或日期。
 - 原文和 official 官方附件自证只能写“原文声称”；supplemental 只能补充背景；只有已抓取 independent 来源支持时才能写“交叉验证”。
 - research_ledger 中 importance=high 的 claim 必须进入 covered_claim_ids，或在 omitted_claims 中给出具体理由。
+- 日期、数量和单位只保留一种清楚格式；不要把同一信息换一种写法放进括号，例如不得写 `2026-07-31（2026 年 7 月 31 日）`。
 - unknowns、限制条件和反例不能被改写成确定结论。
 - 成品正文直接陈述事实、机制和判断，不以“原文说、原博客强调、本文发现、当前材料显示”等研究过程话术组织段落。需要说明来源时点名具体主体或资料（如厂商测试、模型卡、许可条款）；需要表达限制时自然写“官方尚未公布”“没有独立复现”“现有数据不足以支持”。`原文声称` 等审计术语只放在 fact_check、source_notes 和研究账本中。
 - 严格输出 JSON，不要使用 markdown 代码块，不要输出解释文字。
@@ -407,11 +151,13 @@ FULL_SYSTEM_PROMPT = _COMMON_MODE_RULES + _FULL_VOICE_GUIDE + """
 - 关键解释章节可以使用具体问题标题，content 前 1-2 句必须直接回答；不得连续抛出多个问题后才统一作答，也不得用材料无法回答的问题吸引点击。不要把所有章节机械写成问答，其他章节应按材料从事件、结果、数据、例子、冲突或明确判断进入。
 - transition_hook 全文通常使用 3-5 次，只问下一节确实会回答的问题；下一标题可压缩重述但不得逐字复制，不编造悬念，最后一节通常留空。
 - distilled_title 可以从原题与证据材料中重新选择最有点击动机的事实角度，允许使用冲突、反差、后果和口语化表达；但 title_contract.recognition_anchor 必须逐字出现在标题前半句，陌生项目名不能隐去其知名归属方。标题承诺必须在首屏兑现，不能编造人物、动作、数字或结果。
+- 产品发布若有明确、可核验且构成真实点击理由的新规格，标题优先写具体规格，不用“全面升级”“更可控”等抽象判断替代。多个同类上限可靠合计后进入标题时，首屏必须立刻拆回原始组成、单位和适用口径。
 - 新闻、案件和事件型材料的 one_liner 与第一节开头必须先交代谁、何时、何地、做了什么、结果怎样，再进入证据、机制与边界。
 - 默认读者不具备 AI 技术背景。首次专有名词、缩写、指标和机制先用人话说明作用，再给准确术语与条件；读者不查外部资料也应能复述主线。
 - 可用来源媒体含 audio 时，listening_cards 只能引用其中登记的 media_id；每条曲目保留真实提示词，给出可被实际听见的重点，并明确官方精选样曲的证据边界。没有登记音频就留空，不补外部播放器。
 - narrative_plan 必须填写 target_reader、reader_tension、title_contract、opening_anchor、opening_sequence、reader_stake、resonance_basis、stance、reader_takeaway、core_mechanism、distinctive_insight 和 chapter_system，并把 central_question、section_logic、closing_answer 组成内部阅读契约。title_contract 只保留一个点击理由并写清证据边界；opening_sequence 必须在首屏完成；chapter_system 的 chapters 必须与 sections id 一一对应。opening_anchor 与 resonance_basis 必须来自已读取材料，reader_stake 必须具体到判断、选择、成本或机会，stance 必须说明依据和改变条件。core_mechanism 必须是一句能解释“为什么”的因果关系；每一节只能证明、解释、限制或应用它。独特见解必须来自材料中的机制、矛盾、取舍或后果，并由正文完整论证，不能是通用行业口号。
 - 每节只完成一个主要任务，并至少增加新事实、新区别、新机制或新后果。优先让具体证据、动作、数字或案例先出现，再解释意义；能删掉而不削弱中心论证的段落不要保留。
+- 产品页若存在“完整结果明显超过单次能力限制”的已核实反差，优先用它建立开篇问题，再沿真实演示拆解中间工作流。深层机制判断放在案例之后得出，不要抢在首屏用抽象行业结论替读者总结。
 - 检查章节结构变化：相邻章节不要重复同一种开场动作，三个以上章节不要共享完全相同的内部骨架。结构变化必须服从材料，不能为求花样虚构故事或场景。
 - 正文要能作为博客和视频的母稿：主线连续、章节观点可独立提取、关系适合可视化、结论有记忆点；不得写成口播提纲或卡片拼盘。
 - research_ledger.experiments/cases 为空时，对应输出必须是空数组，不能为了丰富文章编造实验或故事。
@@ -425,9 +171,10 @@ FULL_SYSTEM_PROMPT = _COMMON_MODE_RULES + _FULL_VOICE_GUIDE + """
 - status_matrix 包含2至6个固定维度和2至8个对象，每行 cells 数量与 columns 一致，每格写状态和固定语义色；caption 定义状态，boundary 说明定性覆盖不等于性能评分。禁止为了多彩给普通单元格随机染色。
 - decision_table 包含2至8条条件分支，每条写 condition、result、action、tone，并提供版本、范围和例外 boundary。condition/result 必须忠于材料，action 明确是面向读者的应对建议，不能把编辑建议伪装成原始规则。
 - flow.presentation=stepper 只接受3至7个完整对象步骤，每步必须有 label、title、description，可选 result，并提供 caption；普通 static 流程仍可用文字步骤。互动必须帮助读者聚焦复杂阶段，不能为了减少首屏文字把关键事实默认隐藏。
-- timeline.presentation=scrubber 只接受3至8个完整时间节点，每个节点必须有 time、title、description，并提供 caption；Markdown 静态展开所有节点。只有拖动节点能帮助理解阶段变化时才使用，日期清单继续使用 static。
+- timeline.presentation=scrubber 只接受3至8个完整时间节点，每个节点必须有 time、title、description，并提供 caption；无脚本时静态展开所有节点。只有拖动节点能帮助理解阶段变化时才使用，日期清单继续使用 static。
 - layer_stack 只用于真实存在的层级或上下游依赖，包含2至7层；每层必须有 label、title、description，caption 说明层级依据与不能推出的结论。时间先后用 flow 或 timeline，平级比较用 compare_table，不能为追求样式多元错判关系。
 - 同一章节通常只放一个承担解释任务的主视觉；来源图片、音频或视频可作为证据补充。不要连续使用三个相同结构的组件，也不要让视觉复述紧邻正文。matrix 超过6行、4列或24个单元格时，只有“逐格查数”本身是阅读任务才保留，否则拆分或改用分层、指标切换。
+- 优先从内容本身提取视觉结构：提示词含真实时间段时可做分镜 `timeline.scrubber`；多份参考素材被明确分配给场景、人物、区域或声音时可做紧凑分组或可展开 `layer_stack`；不同官方来源对同一能力说法冲突时可做带来源列的紧凑 `compare_table`。这些组件已回答问题时，删除复述同一信息的通用能力矩阵与公开数字卡。
 - scenario_calculator 至少包含 2 个 tabs、每个 tab 至少 1 个有来源的指标、合法 slider 与 result.base，并登记 source_asset_ids。滑块值是用户假设而非证据；若多个数值不属于同一平台、样本或时间口径，必须在指标 note、formula_note 和 caption 中明确说明。
 - capacity_curve 包含3至5个 position 严格递增的定性状态，每项写 label、result 和语义 tone；不得把示意滑块伪装成精确预测器，caption 必须说明转折点随条件变化。
 - cost_ledger 包含1至4个 cost_labels 和2至6个唯一情景；included 只能引用 cost_labels，每个情景写清 verdict 与 explanation，并提供统一 boundary。
@@ -447,65 +194,6 @@ FULL_SYSTEM_PROMPT = _COMMON_MODE_RULES + _FULL_VOICE_GUIDE + """
 - 最终逐段清理元叙述：正文 sections[].content 中不要出现“原文/原博客/本文/当前材料”作为叙事主语；将其改写为自然文章语气，或点名真正的信息主体。
 - 最终做一次读者体验复查：删掉报告腔开场和空泛总结，解释首次出现的术语，拆开文字墙，并改变连续重复的句式。再脱离标题、摘要、提纲和来源说明冷读正文，确认它自身能说清中心、关键支撑和最终完成的结果或选择；把最后两段分别删掉试读，删后更有力就提前结束。不要为了口语化删掉证据条件或把概率结论写成确定事实。
 - 最终做一次活人感反查：不要让每一节都有金句、反转、反问和完整收束；删除虚构的读者声音、假故事、假犹豫、材料不支持的第一人称体验和强行升华。用自然的长短句变化、准确的读者处境、一次有效回环和具体判断建立朋友感，不模仿任何作者的固定口癖。
-"""
-
-
-ONEPAGER_SYSTEM_PROMPT = _COMMON_MODE_RULES + """
-你是中文资讯主编。只生成 500-800 字一页纸新闻体，不生成完整长文和小红书卡片。重新组织信息，不要机械截短原文。
-
-严格输出：
-{
-  "distilled_title": "准确、直接的新闻标题",
-  "category_tags": ["3-5 个具体主题标签，不使用来源名或宽泛大类词凑数"],
-  "source_bias_declaration": "一句话来源局限",
-  "one_pager": {
-    "lead": "2-3 句导语，给出冲突、反差和实际影响，不制造材料外悬念",
-    "key_sections": [{"subtitle": "8-15 字论点式小标题", "content": "2-4 个短段，保留关键数字、条件和限制，可用 **加粗**"}],
-    "references": [{"title": "显示文本", "url": "输入中真实 URL"}]
-  },
-  "fact_check": [{"claim": "关键主张", "verdict": "确认|原文声称|交叉验证|存疑|夸大|无法核实", "note": "理由", "evidence": [{"url": "真实 URL", "source_type": "original|official|supplemental|independent", "publisher": "发布者"}]}],
-  "source_notes": "来源与可信度说明",
-  "editorial_coverage": {"covered_claim_ids": ["c1"], "omitted_claims": [{"id": "c2", "reason": "具体理由"}]}
-}
-
-额外要求：
-- key_sections 只选 3-5 个，每节必须带来新信息；总字数控制在 500-800 字。
-- 导语先讲读者为什么要关心，中段讲事实和机制，结尾讲边界或下一步。
-- 不使用完整文章的目录、思维导图、行动卡或组件标签。
-"""
-
-
-CARDS_SYSTEM_PROMPT = _COMMON_MODE_RULES + """
-你是小红书知识图文编辑。只生成移动端图文卡片文案，不生成完整长文和一页纸。每张卡只承载一个信息单元，截图后必须能独立理解。
-
-严格输出：
-{
-  "distilled_title": "内容主题",
-  "category_tags": ["3-5 个具体主题标签，不使用来源名或宽泛大类词凑数"],
-  "source_bias_declaration": "一句话来源局限",
-  "card_deck": {
-    "visual_system": "guizang-editorial|guizang-kraft|guizang-swiss|classic",
-    "layout_plan": ["cover", "content", "data", "statement", "warning", "flow", "system", "takeaway"],
-    "cover_emoji": "主题 emoji",
-    "cover_hook": "10-20 字准确钩子，可用 \\n 换行",
-    "cover_sub": "封面副标题",
-    "author_name": "署名",
-    "xhs_title": "不超过 20 字的发布标题",
-    "xhs_body": "3-5 句口语化发布正文",
-    "cards": [{"title": "不超过 12 字", "body": "2-3 句，允许 <b>/<strong>", "claim_ids": ["c1"], "source_status": "source_only|cross_checked|disputed|unknown", "highlight": "关键数字或金句", "emoji": "不同 emoji", "type": "info|data|alert|quote|mindmap|flow|handwritten", "nodes": [], "steps": [], "center": ""}],
-    "summary": ["3-4 条行动导向总结"],
-    "tags": ["3-5 个不带 # 的标签"]
-  },
-  "fact_check": [{"claim": "关键主张", "verdict": "确认|原文声称|交叉验证|存疑|夸大|无法核实", "note": "理由", "evidence": [{"url": "真实 URL", "source_type": "original|official|supplemental|independent", "publisher": "发布者"}]}],
-  "source_notes": "来源与可信度说明",
-  "editorial_coverage": {"covered_claim_ids": ["c1"], "omitted_claims": [{"id": "c2", "reason": "具体理由"}]}
-}
-
-额外要求：
-- 选择 6-9 张内容卡，不连续使用 3 张相同角色，不得把同一结论换句话重复。
-- 每张卡必须用 claim_ids 绑定研究账本主张，并保存 source_status；source_status 不得高于关联主张的证据等级。
-- 数据、价格、日期、比较和性能结论必须来自研究账本；来源状态逐卡保留。
-- 卡片文案负责信息表达；AI 配图是可选后处理，不得让图片承担事实证据。
 """
 
 
@@ -570,77 +258,16 @@ RESEARCH_PROMPT = """你是事实研究员，不负责写文章。请把原文�
 """
 
 
-EDITORIAL_REVIEW_PROMPT = """你是严格的中文主编。你会收到研究证据账本和一份三态解读草稿。你的任务不是点评后结束，而是完成一次可发布修订。
-
-依次检查：
-1. 连贯性：中心问题是否清楚；内部阅读契约的开头承诺、正文主链和读后判断是否一致；关键解释章节是否形成“具体问题标题 → 前 1-2 句短答案 → 证据与原因 → 边界”的闭环；结尾是否回答开头。检查每个非空 transition_hook 是否承接本节并由下一节立即回答，删除连续堆问、空悬念和逐字重复。
-2. 完整性：importance=high 的研究主张是否全部进入正文，或在 omitted_claims 中说明舍弃理由；限制条件、反例、unknowns 是否被保留。研究账本存在 high 实验或案例时，experiment_ledger/case_stories 是否完整覆盖并保留条件与边界。high metric 主张是否进入 number_stories，并完整保留主数字、分母、时间、对照或变化、范围、边界与来源。
-3. 去重：不同正文段、一页纸小节和卡片不得重复同一结论来凑数量。
-4. 三态一致：full、one_pager、card_deck 可以改变密度和语气，但事实、数字、比较对象、结论强度必须一致。
-5. 来源边界：不得新增研究账本和草稿中没有的事实、URL、数字、产品名、价格或日期；不得把 source_only 改成 cross_checked；不得把案例重建写成逐字对话。
-6. 语言审校：逐句先抽主谓宾和中心语，再做并列项横向搭配、前后纵向照应、结构完整、否定还原、真实歧义、数量范围与标点检查。每处先判“明确病句 / 存疑依赖语境 / 无明显语病”；明确病句按增、删、换、调做最小修改，存疑项保留风险，不得猜原意。标题、表格标题、表头和短句同样检查；不得改变事实、主体、因果、时间、程度、数字和条件范围，也不得把纯文风偏好冒充语病。
-7. 结构与节奏：每节只完成一个主要任务并增加新信息；具体证据优先于抽象解释。相邻章节不得机械重复同一种开场动作，三个以上章节不得共享完全相同的问答或论证骨架；变化必须来自材料，不能虚构场景。
-8. 冷读与删减：脱离标题、摘要、提纲和来源说明，只读正文仍能说清中心、关键支撑和最终结果或选择。删除不削弱论证的段落；最后两段分别删后更有力时提前结束。
-9. 人味终审：全文是否只有一个核心机制；读者处境是否具体且没有代编内心戏；异议是否按最强合理版本回应；知识是否在需要时自然出现；开头线索是否在结尾得到一次回响。清理段段金句、匀速排比、固定连接词、虚构反问、假脆弱、假故事和无必要升华，不得用粗口、口癖、故意病句或虚构第一人称体验伪造“活人感”。
-10. 媒体自检：逐一核对登记的 demo/hero 视频是否采用或给出具体省略理由；采用素材必须比正文增加可见信息。外语图片或视频必须有自然中文图注和中文观看重点/读图提示，不能编造字幕、翻译或画面内容。
-11. 内容完整：不得返回只有修改片段的补丁；revised_article 必须是可直接交给渲染器的完整 JSON。
-
-严格输出：
-{
-  "quality_report": {
-    "coherence_score": 0,
-    "coverage_score": 0,
-    "problems_found": ["具体问题"],
-    "transitions_fixed": ["修复了哪些段落关系"],
-    "transition_hooks_fixed": ["补充、改写或删除了哪些阅读钩子，以及下一节如何回答"],
-    "question_answer_loops_fixed": ["哪些章节的问题、开篇短答案或证据展开得到修复"],
-    "reading_contract_fixes": ["开头承诺、正文主链或读后判断如何重新对齐"],
-    "structural_variety_fixes": ["哪些机械重复的章节开场或内部骨架得到调整"],
-    "cold_read_fixes": ["冷读和删除测试删改了哪些不推进论证的段落或结尾"],
-    "core_mechanism_fixes": ["如何把并列观点收束成一个核心机制"],
-    "human_voice_fixes": ["清理了哪些假共鸣、匀速节奏、段段金句、虚构反问或强行升华"],
-    "content_gaps_fixed": ["补回了哪些高优先级事实、限制或反例"],
-    "duplicates_removed": ["删除或合并了哪些重复内容"],
-    "language_issues_fixed": ["原句 -> 修订句"],
-    "grammar_diagnoses": [{"path": "字段路径", "judgment": "明确病句|存疑依赖语境", "category": "搭配不当等类型", "problem": "具体成分为什么不成立", "minimal_fix": "最小修改；存疑时留空"}],
-    "grammar_false_positive_checks": ["哪些高风险表面结构经语境判断后保留，以及理由"],
-    "remaining_risks": ["材料本身仍无法解决的问题"]
-  },
-  "revised_article": {
-    "要求": "保留草稿全部顶层结构并返回完整修订稿；必须含 narrative_plan、sections、experiment_ledger、case_stories、number_stories、evidence_gallery、fact_check、editorial_coverage、one_pager、card_deck"
-  }
-}
-
-评分不能代替修订。即使草稿问题很多，也必须在 revised_article 中实际修好；无法修复的内容写入 remaining_risks，不得编造。
-"""
-
-
-def _system_prompt_for_modes(required_modes: tuple[str, ...]) -> str:
-    modes = {str(mode) for mode in required_modes}
-    if modes == {"full"}:
-        return FULL_SYSTEM_PROMPT
-    if modes == {"onepager"}:
-        return ONEPAGER_SYSTEM_PROMPT
-    if modes == {"cards"}:
-        return CARDS_SYSTEM_PROMPT
-    return SYSTEM_PROMPT
+def _system_prompt_for_modes(_required_modes: tuple[str, ...]) -> str:
+    return FULL_SYSTEM_PROMPT
 
 
 def _editorial_review_prompt_for_modes(required_modes: tuple[str, ...]) -> str:
-    modes = {str(mode) for mode in required_modes}
-    if len(modes) != 1:
-        return EDITORIAL_REVIEW_PROMPT
-    mode = next(iter(modes))
-    required = {
-        "full": "narrative_plan、sections、experiment_ledger、case_stories、number_stories、source_media、media_omissions、evidence_gallery、fact_check、editorial_coverage",
-        "onepager": "one_pager、fact_check、editorial_coverage",
-        "cards": "card_deck、fact_check、editorial_coverage",
-    }.get(mode, "草稿中的全部顶层结构")
-    focus = {
-        "full": "先检查是否真正面向希望了解并进入 AI 领域的聪明初学者：首屏承诺清楚，首次术语可懂，读者能复述主线、领域意义和独特见解。再检查标题点击动机、事件 5W、论证链、实验条件、案例来源、限制与结尾回答，以及母稿的博客/视频可复用性。quick_scan 必须是 3 条且总计不超过 180 字；不得把重建案例写成逐字对话。",
-        "onepager": "检查 500-800 字新闻节奏、3-5 个小节、导语信息增量、数字口径和结尾边界。",
-        "cards": "检查 6-9 张卡的信息独立性、角色节奏、逐卡来源状态、移动端文案长度和重复结论。",
-    }.get(mode, "检查完整性和来源边界。")
+    if set(required_modes) != {"full"}:
+        raise ValueError("article-distiller 只支持 full 深度文章审校")
+    mode = "full"
+    required = "narrative_plan、sections、experiment_ledger、case_stories、number_stories、source_media、media_omissions、evidence_gallery、fact_check、editorial_coverage"
+    focus = "先检查是否真正面向希望了解并进入 AI 领域的聪明初学者：首屏承诺清楚，首次术语可懂，读者能复述主线、领域意义和独特见解。再检查标题点击动机、事件 5W、论证链、实验条件、案例来源、限制与结尾回答，以及母稿的博客/视频可复用性。quick_scan 必须是 3 条且总计不超过 180 字；不得把重建案例写成逐字对话。"
     voice_requirement = ""
     voice_report_fields = ""
     if mode == "full":
@@ -830,43 +457,11 @@ def _apply_article_patch(draft: dict, patch: dict) -> dict:
     return result
 
 
-def _review_output_mode(mode_adapter, required_modes: tuple[str, ...]) -> str:
+def _review_output_mode() -> str:
     explicit = os.getenv("DISTILL_REVIEW_OUTPUT_MODE", "").strip().lower()
     if explicit in {"patch", "full"}:
         return explicit
-    if mode_adapter is not None:
-        configured = str(
-            getattr(mode_adapter, "EDITORIAL_REVIEW_OUTPUT_MODE", "full") or "full"
-        ).strip().lower()
-        return configured if configured in {"patch", "full"} else "full"
-    return "patch" if len(required_modes) == 1 else "full"
-
-
-def _adapter_text(mode_adapter, name: str, fallback: str) -> str:
-    """Read a prompt exported by an optional output-mode adapter."""
-    if mode_adapter is None:
-        return fallback
-    value = getattr(mode_adapter, name, None)
-    if callable(value):
-        value = value()
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"输出模式适配器缺少非空 {name}")
-    return value
-
-
-def _adapter_int(mode_adapter, name: str, fallback: int, minimum: int = 0) -> int:
-    value = getattr(mode_adapter, name, fallback) if mode_adapter is not None else fallback
-    try:
-        return max(minimum, int(value))
-    except (TypeError, ValueError):
-        return fallback
-
-
-def _adapter_bool(mode_adapter, name: str, fallback: bool) -> bool:
-    value = getattr(mode_adapter, name, fallback) if mode_adapter is not None else fallback
-    if isinstance(value, str):
-        return value.strip().lower() not in {"0", "false", "no", "off"}
-    return bool(value)
+    return "patch"
 
 
 def _env_int(name: str, fallback: int, minimum: int = 0) -> int:
@@ -895,15 +490,11 @@ def _build_draft_context(
     evidence_articles: list[Article],
     research: dict | None,
     full_user_prompt: str,
-    mode_adapter=None,
 ) -> str:
     """Avoid resending raw attachments after research while preserving the original."""
-    default_mode = "original+research-ledger" if mode_adapter is None else "full"
-    context_mode = str(getattr(mode_adapter, "DRAFT_CONTEXT_MODE", default_mode) or default_mode)
-    if context_mode != "research-ledger" or not isinstance(research, dict):
-        if context_mode != "original+research-ledger" or not isinstance(research, dict):
-            return full_user_prompt
-    ledger_limit = _adapter_int(mode_adapter, "RESEARCH_LEDGER_MAX_CHARS", 40000, 1000)
+    if not isinstance(research, dict):
+        return full_user_prompt
+    ledger_limit = 40000
     sources = _compact_source_registry(article, evidence_articles)
     context = (
         f"原文标题：{article.title or '(未提取到)'}\n"
@@ -912,20 +503,19 @@ def _build_draft_context(
         f"原文 URL：{article.url}\n"
         f"允许引用的已抓取来源：{json.dumps(sources, ensure_ascii=False)}\n\n"
     )
-    if context_mode == "original+research-ledger":
-        source_links = [
-            item for item in (getattr(article, "source_links", []) or [])
-            if isinstance(item, dict) and (item.get("fetched") or item.get("url") == article.url)
-        ][:16]
-        media_assets = [
-            item for item in (getattr(article, "media_assets", []) or [])
-            if isinstance(item, dict)
-        ][:16]
-        context += (
-            f"可用来源链接：{json.dumps(source_links, ensure_ascii=False)}\n"
-            f"可用来源媒体：{json.dumps(media_assets, ensure_ascii=False)}\n\n"
-            f"--- 原始文章正文（共 {article.text_chars} 字）---\n{article.text}\n\n"
-        )
+    source_links = [
+        item for item in (getattr(article, "source_links", []) or [])
+        if isinstance(item, dict) and (item.get("fetched") or item.get("url") == article.url)
+    ][:16]
+    media_assets = [
+        item for item in (getattr(article, "media_assets", []) or [])
+        if isinstance(item, dict)
+    ][:16]
+    context += (
+        f"可用来源链接：{json.dumps(source_links, ensure_ascii=False)}\n"
+        f"可用来源媒体：{json.dumps(media_assets, ensure_ascii=False)}\n\n"
+        f"--- 原始文章正文（共 {article.text_chars} 字）---\n{article.text}\n\n"
+    )
     context += (
         "--- 研究员生成的证据账本 ---\n"
         + _serialize_research_ledger(research, max_chars=ledger_limit)
@@ -992,7 +582,6 @@ def _pipeline_fingerprint(
     _review_prompt: str,
     two_stage: bool,
     editorial_review: bool,
-    mode_adapter=None,
 ) -> str:
     return _hash_payload({
         "cache_version": _PIPELINE_CACHE_VERSION,
@@ -1005,14 +594,12 @@ def _pipeline_fingerprint(
         "required_modes": required_modes,
         "two_stage": two_stage,
         "editorial_review": editorial_review,
-        "research_prompt_hash": _hash_payload(
-            _adapter_text(mode_adapter, "RESEARCH_PROMPT", RESEARCH_PROMPT)
-        ),
+        "research_prompt_hash": _hash_payload(RESEARCH_PROMPT),
         "writing_prompt_hash": _hash_payload(writing_prompt),
         # Review protocol changes do not alter research or writing inputs. The
         # review checkpoint hashes its own prompt separately so switching
         # between patch/full output can reuse the expensive upstream stages.
-        "draft_context_mode": str(getattr(mode_adapter, "DRAFT_CONTEXT_MODE", "original+research-ledger")),
+        "draft_context_mode": "original+research-ledger",
     })
 
 
@@ -1185,8 +772,7 @@ def distill(
     evidence_articles: Optional[list[Article]] = None,
     two_stage: bool = True,
     editorial_review: bool = True,
-    required_modes: tuple[str, ...] = ("full", "onepager", "cards"),
-    mode_adapter=None,
+    required_modes: tuple[str, ...] = ("full",),
     checkpoint_dir: str | None = None,
 ) -> dict:
     """把 Article 喂给 LLM，返回通过质量门禁的解读 dict。"""
@@ -1204,11 +790,11 @@ def distill(
         raise RuntimeError("缺少 openai 库，请先 pip install openai") from e
 
     evidence_articles = evidence_articles or []
-    evidence_limit = _adapter_int(mode_adapter, "EVIDENCE_SOURCE_LIMIT", 5, 1)
-    evidence_char_limit = _adapter_int(mode_adapter, "EVIDENCE_CHAR_LIMIT", 12000, 1000)
-    repository_char_limit = _adapter_int(
-        mode_adapter, "REPOSITORY_CONTEXT_CHAR_LIMIT", 12000, 0
-    )
+    if set(required_modes) != {"full"}:
+        raise ValueError("article-distiller 只支持 full 深度文章")
+    evidence_limit = 5
+    evidence_char_limit = 12000
+    repository_char_limit = 12000
     evidence_block = ""
     if evidence_articles:
         chunks = []
@@ -1231,12 +817,6 @@ def distill(
 
     source_links = getattr(article, "source_links", []) or []
     media_assets = getattr(article, "media_assets", []) or []
-    if bool(getattr(mode_adapter, "COMPACT_SOURCE_REGISTRY", False)):
-        source_links = [
-            item for item in source_links
-            if isinstance(item, dict) and item.get("fetched")
-        ][:12]
-        media_assets = [item for item in media_assets if isinstance(item, dict)][:8]
     user_prompt = (
         f"原文标题：{article.title or '(未提取到)'}\n"
         f"作者：{article.author or '(未知)'}\n"
@@ -1250,17 +830,9 @@ def distill(
         f"{evidence_block}"
     )
 
-    writing_system_prompt = _adapter_text(
-        mode_adapter,
-        "SYSTEM_PROMPT",
-        _system_prompt_for_modes(required_modes),
-    )
-    full_review_system_prompt = _adapter_text(
-        mode_adapter,
-        "EDITORIAL_REVIEW_PROMPT",
-        _editorial_review_prompt_for_modes(required_modes),
-    )
-    review_output_mode = _review_output_mode(mode_adapter, required_modes)
+    writing_system_prompt = _system_prompt_for_modes(required_modes)
+    full_review_system_prompt = _editorial_review_prompt_for_modes(required_modes)
+    review_output_mode = _review_output_mode()
     review_system_prompt = (
         _editorial_patch_review_prompt_for_modes(required_modes)
         if review_output_mode == "patch"
@@ -1275,7 +847,6 @@ def distill(
         review_system_prompt,
         two_stage,
         editorial_review,
-        mode_adapter=mode_adapter,
     )
 
     cfg = dict(cfg)
@@ -1286,18 +857,14 @@ def distill(
     stream_default = os.getenv("DISTILL_LLM_STREAM", "1").strip().lower() not in {
         "0", "false", "no", "off",
     }
-    cfg["_manual_max_retries"] = _adapter_int(mode_adapter, "LLM_MAX_RETRIES", retry_default, 0)
-    cfg["_retry_delay_seconds"] = _adapter_int(
-        mode_adapter, "LLM_RETRY_DELAY_SECONDS", retry_delay_default, 0
-    )
-    cfg["_retry_max_wait_seconds"] = _adapter_int(
-        mode_adapter, "LLM_RETRY_MAX_WAIT_SECONDS", retry_wait_default, 0
-    )
-    cfg["_stream"] = _adapter_bool(mode_adapter, "LLM_STREAM", stream_default)
+    cfg["_manual_max_retries"] = retry_default
+    cfg["_retry_delay_seconds"] = retry_delay_default
+    cfg["_retry_max_wait_seconds"] = retry_wait_default
+    cfg["_stream"] = stream_default
     client_kwargs = {
         "base_url": cfg["base_url"],
         "api_key": cfg["api_key"],
-        "timeout": _adapter_int(mode_adapter, "LLM_TIMEOUT_SECONDS", timeout_default, 30),
+        "timeout": timeout_default,
         "max_retries": 0,
     }
     client = OpenAI(**client_kwargs)
@@ -1309,7 +876,7 @@ def distill(
                 research = _call_json(
                     client,
                     cfg,
-                    _adapter_text(mode_adapter, "RESEARCH_PROMPT", RESEARCH_PROMPT),
+                    RESEARCH_PROMPT,
                     user_prompt,
                     temperature=0.1,
                     stage="研究阶段",
@@ -1317,20 +884,14 @@ def distill(
                 _save_stage_checkpoint(checkpoint_dir, "research", fingerprint, research)
             except ValueError as exc:
                 print(f"[研究阶段警告] {exc}；已回退为单阶段写作。", file=sys.stderr)
-            except Exception as exc:  # noqa: BLE001
-                if not bool(getattr(mode_adapter, "RESEARCH_FAILURE_FALLBACK", False)):
-                    raise
-                print(
-                    f"[研究阶段警告] {_llm_error_summary(exc)}；已回退为完整原文单阶段写作。",
-                    file=sys.stderr,
-                )
+            except Exception:  # noqa: BLE001
+                raise
         if research is not None:
             editorial_prompt = _build_draft_context(
                 article,
                 evidence_articles[:evidence_limit],
                 research,
                 user_prompt,
-                mode_adapter=mode_adapter,
             )
         else:
             editorial_prompt = user_prompt
@@ -1357,32 +918,9 @@ def distill(
     review_meta: dict = {"status": "skipped", "selected_version": "draft"}
     selected_language_fixes: list[dict] = []
     review_trigger_audit = None
-    review_policy = str(getattr(mode_adapter, "EDITORIAL_REVIEW_POLICY", "always") or "always")
-    if editorial_review and review_policy == "on-failure":
-        probe_draft, probe_language_fixes = apply_safe_language_fixes(draft)
-        probe_audit = getattr(mode_adapter, "audit_distilled", audit_distilled)(
-            probe_draft, research, required_modes, strict_editorial=True
-        )
-        if probe_audit.get("publishable"):
-            editorial_review = False
-            result = probe_draft
-            selected_language_fixes = probe_language_fixes
-            review_meta = {
-                "status": "not_needed",
-                "selected_version": "draft",
-                "draft_audit": probe_audit,
-            }
-            print("[编辑审校阶段] 草稿已通过本地门禁，跳过模型审校", flush=True)
-        else:
-            blocker_count = len(probe_audit.get("blockers") or [])
-            review_trigger_audit = probe_audit
-            print(
-                f"[编辑审校阶段] 草稿有 {blocker_count} 个阻断项，启动模型审校",
-                flush=True,
-            )
     if editorial_review and review_output_mode == "patch" and review_trigger_audit is None:
         probe_draft, _ = apply_safe_language_fixes(draft)
-        review_trigger_audit = getattr(mode_adapter, "audit_distilled", audit_distilled)(
+        review_trigger_audit = audit_distilled(
             probe_draft, research, required_modes, strict_editorial=True
         )
         print(
@@ -1392,7 +930,7 @@ def distill(
         )
     if editorial_review:
         try:
-            ledger_limit = _adapter_int(mode_adapter, "RESEARCH_LEDGER_MAX_CHARS", 40000, 1000)
+            ledger_limit = 40000
             review_context = (
                 "--- 原文标题 ---\n"
                 + (article.title or "(未提取到)")
@@ -1525,8 +1063,7 @@ def distill(
                 raise ValueError("编辑审校阶段缺少完整 revised_article 对象")
             fixed_draft, draft_language_fixes = apply_safe_language_fixes(draft)
             fixed_revised, revised_language_fixes = apply_safe_language_fixes(revised)
-            choose = getattr(mode_adapter, "choose_preferred", choose_preferred)
-            result, selected, draft_audit, revised_audit = choose(
+            result, selected, draft_audit, revised_audit = choose_preferred(
                 fixed_draft, fixed_revised, research, required_modes
             )
             selected_language_fixes = (
@@ -1552,9 +1089,7 @@ def distill(
     result, final_language_fixes = apply_safe_language_fixes(result)
     language_fixes = selected_language_fixes + final_language_fixes
     result = dict(result)
-    audit = getattr(mode_adapter, "audit_distilled", audit_distilled)
-    require_publishable = getattr(mode_adapter, "assert_publishable", assert_publishable)
-    final_audit = audit(result, research, required_modes, strict_editorial=True)
+    final_audit = audit_distilled(result, research, required_modes, strict_editorial=True)
 
     if editorial_review and not final_audit.get("publishable"):
         repair_parent_hash = _hash_payload({
@@ -1617,8 +1152,7 @@ def distill(
         repaired = repaired_response.get("revised_article")
         if isinstance(repaired, dict):
             fixed_repaired, repair_language_fixes = apply_safe_language_fixes(repaired)
-            choose = getattr(mode_adapter, "choose_preferred", choose_preferred)
-            result, repaired_selected, current_audit, repaired_audit = choose(
+            result, repaired_selected, current_audit, repaired_audit = choose_preferred(
                 result, fixed_repaired, research, required_modes
             )
             if repaired_selected == "revised":
@@ -1633,7 +1167,7 @@ def distill(
                 if isinstance(repaired_response.get("quality_report"), dict)
                 else {},
             }
-            final_audit = audit(result, research, required_modes, strict_editorial=True)
+            final_audit = audit_distilled(result, research, required_modes, strict_editorial=True)
         else:
             review_meta = {
                 **review_meta,
@@ -1641,7 +1175,7 @@ def distill(
                 "repair_error": "质量修复阶段缺少完整 revised_article 对象",
             }
 
-    require_publishable(final_audit, "编辑审校后的文章")
+    assert_publishable(final_audit, "编辑审校后的文章")
     result["editorial_quality"] = {
         **review_meta,
         "language_fixes": language_fixes,
@@ -1709,24 +1243,10 @@ def _serialize_draft(draft: dict, max_chars: int = 60000) -> str:
     ):
         if isinstance(compact.get(field), list):
             compact[field] = compact[field][:limit]
-    deck = compact.get("card_deck") if isinstance(compact.get("card_deck"), dict) else {}
-    if deck:
-        deck = dict(deck)
-        deck["cards"] = _list_prefix(deck.get("cards"), 9)
-        compact["card_deck"] = deck
-    onepager = compact.get("one_pager") if isinstance(compact.get("one_pager"), dict) else {}
-    if onepager:
-        onepager = dict(onepager)
-        onepager["key_sections"] = _list_prefix(onepager.get("key_sections"), 5)
-        compact["one_pager"] = onepager
     serialized = json.dumps(compact, ensure_ascii=False)
     if len(serialized) > max_chars:
         raise ValueError("草稿过大，无法在不破坏 JSON 的情况下送入编辑审校阶段")
     return serialized
-
-
-def _list_prefix(value, limit: int) -> list:
-    return value[:limit] if isinstance(value, list) else []
 
 
 def _llm_error_summary(exc: Exception) -> str:
@@ -1900,15 +1420,14 @@ def build_manual_prompt(
     article: Article,
     evidence_articles: Optional[list[Article]] = None,
     required_modes: tuple[str, ...] = ("full",),
-    mode_adapter=None,
 ) -> str:
     """没 key 时的降级：返回让用户自己拿去任意 LLM 跑的解读 prompt 文本。"""
     evidence_articles = evidence_articles or []
-    evidence_limit = _adapter_int(mode_adapter, "EVIDENCE_SOURCE_LIMIT", 5, 1)
-    evidence_char_limit = _adapter_int(mode_adapter, "EVIDENCE_CHAR_LIMIT", 12000, 1000)
-    repository_char_limit = _adapter_int(
-        mode_adapter, "REPOSITORY_CONTEXT_CHAR_LIMIT", 12000, 0
-    )
+    if set(required_modes) != {"full"}:
+        raise ValueError("article-distiller 只支持 full 深度文章")
+    evidence_limit = 5
+    evidence_char_limit = 12000
+    repository_char_limit = 12000
     evidence_block = ""
     if evidence_articles:
         chunks = []
@@ -1933,5 +1452,5 @@ def build_manual_prompt(
         f"{article.text}\n\n"
         f"{evidence_block}\n\n"
         "--- 解读要求与输出格式 ---\n"
-        f"{_adapter_text(mode_adapter, 'SYSTEM_PROMPT', _system_prompt_for_modes(required_modes))}\n"
+        f"{_system_prompt_for_modes(required_modes)}\n"
     )

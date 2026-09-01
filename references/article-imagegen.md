@@ -50,14 +50,14 @@ AI 位图不能一张直出即发布。先用同一内容目标生成至少 2 �
 只生成提示词和 manifest，不调用图片接口：
 
 ```bash
-python scripts/distill.py --render pack.json distilled.json --format full \
+python scripts/run.py --render pack.json distilled.json \
   --article-images prompts -o article
 ```
 
 实际生成 2 张 16:9 解释图并嵌入 HTML：
 
 ```bash
-python scripts/distill.py --render pack.json distilled.json --format full \
+python scripts/run.py --render pack.json distilled.json \
   --article-images generate --article-image-count 2 \
   --article-image-plan illustration-plan.json -o article
 ```
@@ -65,7 +65,7 @@ python scripts/distill.py --render pack.json distilled.json --format full \
 文章文字改动后复用已经审核通过的图片，不产生新的图片 token：
 
 ```bash
-python scripts/distill.py --render pack.json distilled.json --format full \
+python scripts/run.py --render pack.json distilled.json \
   --article-images reuse --article-image-plan illustration-plan.json \
   --article-image-manifest previous_article_assets/manifest.json -o article-revised
 ```

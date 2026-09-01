@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import py_compile
 import subprocess
@@ -13,22 +12,22 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from package_skill import FILES, GENERATED_FILES, build
+from package_skill import FILES, build
 
 
 CORE_TESTS = (
-    "test_hardening.py",
-    "test_sources_media.py",
-    "test_primary_repository.py",
-    "test_file_ingest.py",
-    "test_language_quality.py",
-    "test_article_depth.py",
-    "test_visual_selection.py",
-    "test_interactive_progression.py",
-    "test_metric_bars.py",
-    "test_number_evidence.py",
-    "test_responsive_article.py",
-    "test_environment_portability.py",
+    "tests/test_hardening.py",
+    "tests/test_sources_media.py",
+    "tests/test_primary_repository.py",
+    "tests/test_file_ingest.py",
+    "tests/test_language_quality.py",
+    "tests/test_article_depth.py",
+    "tests/test_visual_selection.py",
+    "tests/test_interactive_progression.py",
+    "tests/test_metric_bars.py",
+    "tests/test_number_evidence.py",
+    "tests/test_responsive_article.py",
+    "tests/test_environment_portability.py",
 )
 
 
@@ -61,7 +60,10 @@ def validate_source(source_root: Path, *, run_tests: bool = True) -> list[str]:
             errors.append(f"包含个人绝对路径：{path.relative_to(source_root)}")
 
     cli = (source_root / "references/cli.md").read_text(encoding="utf-8").casefold()
-    for forbidden in ("--format all", "--format cards", "--format onepager", "小红书卡片"):
+    for forbidden in (
+        "--format all", "--format cards", "--format onepager", "小红书卡片",
+        "--md", "--both", "html/markdown", "html 与 markdown", "html 和 markdown",
+    ):
         if forbidden in cli:
             errors.append(f"深度版 CLI 文档含越界功能：{forbidden}")
 
@@ -96,16 +98,14 @@ def validate_archive(source_root: Path) -> list[str]:
         with zipfile.ZipFile(archive) as handle:
             handle.extractall(temp_root / "unpacked")
         unpacked = temp_root / "unpacked/article-distiller"
-        index = json.loads((unpacked / "data/concept_index.json").read_text(encoding="utf-8"))
-        if index != {"concepts": {}, "articles": []}:
-            errors.append("发行包概念索引不是空白运行时索引")
         try:
             help_text = _run([sys.executable, str(unpacked / "scripts/run.py"), "--help"], cwd=unpacked)
         except RuntimeError as exc:
             errors.append(str(exc))
         else:
-            if "--format {full}" not in help_text or "onepager" in help_text or "cards" in help_text:
-                errors.append("独立解包入口没有锁定为深度文章")
+            forbidden_help = ("--format", "onepager", "cards", "--md", "--both", "markdown")
+            if any(item in help_text.casefold() for item in forbidden_help):
+                errors.append("独立解包入口没有锁定为 HTML 深度文章")
         source = temp_root / "sample.md"
         source.write_text("# 测试文章\n\n这是用于独立解包冒烟测试的正文。" * 20, encoding="utf-8")
         pack = temp_root / "sample.pack.json"
@@ -117,7 +117,6 @@ def validate_archive(source_root: Path) -> list[str]:
                 str(source),
                 "--source-only",
                 "--no-dynamic-media",
-                "--no-index",
                 "-o",
                 str(pack),
             ], cwd=unpacked)
@@ -128,7 +127,7 @@ def validate_archive(source_root: Path) -> list[str]:
                 errors.append("独立解包 source-only 未生成材料包")
             if "onepager" in output.casefold() or "cards" in output.casefold() or "一页纸" in output:
                 errors.append("独立解包 source-only 仍提示越界输出格式")
-        for relative in [*FILES, *GENERATED_FILES]:
+        for relative in FILES:
             if not (unpacked / relative).is_file():
                 errors.append(f"发行包缺少：{relative}")
     return errors

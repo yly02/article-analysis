@@ -1,33 +1,27 @@
 #!/usr/bin/env python3
-"""article-distiller 主入口：把任意网页文章二次解读成图文 HTML / Markdown。
+"""article-distiller 主入口：把任意网页文章二次解读成图文 HTML。
 
 v9.17：深度文章独立入口、动态媒体发现与可移植发布门禁。
 
 用法示例：
-  # 全自动（需要 LLM key）—— 默认输出正文版 HTML
+  # 全自动（需要 LLM key）—— 输出正文版 HTML
   python run.py https://example.com/article
-
-  # 正文版同时输出 HTML + Markdown + 生成领域 skill
-  python run.py https://example.com/article --both --gen-skill
 
   # 没 key：先抓取 + 生成 prompt 包
   python run.py https://example.com/article --source-only -o pack.json
 
   # 抓不到正文时：从纯文本、Markdown、PDF 或 Word 读取
   python run.py --from-text raw.txt --title "标题"
-  python run.py article.pdf --both -o out
-  python run.py report.docx --both -o out
+  python run.py article.pdf -o out
+  python run.py report.docx -o out
 
   # 拿到 prompt 包跑完 LLM 后，回来渲染
-  python run.py --render pack.json distilled.json -o out --both
+  python run.py --render pack.json distilled.json -o out
 
-  # 查看概念索引统计
-  python distill.py --index-stats
 """
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -37,12 +31,6 @@ from urllib.parse import urlsplit
 
 from dependency_bootstrap import ensure_python_dependencies, runtime_python_check
 
-_OPTIONAL_MODE_FILES = ("onepager_renderer.py", "card_renderer.py")
-DEEP_ONLY = (
-    os.environ.get("ARTICLE_DISTILLER_DEEP_ONLY") == "1"
-    or not all(os.path.isfile(os.path.join(os.path.dirname(__file__), name)) for name in _OPTIONAL_MODE_FILES)
-)
-
 runtime_python_check()
 ensure_python_dependencies(["trafilatura", "lxml_html_clean", "pypdf"])
 
@@ -51,76 +39,12 @@ from dynamic_media import discover_dynamic_page_assets
 from file_ingest import article_from_file
 from distiller import _editorial_review_prompt_for_modes, build_manual_prompt, distill
 from renderer import render_html
-from md_renderer import render_md
 from article_imagegen import enhance_article_images
 from evidence import normalize_distilled, normalize_url, url_key
 from editorial_quality import assert_publishable, audit_distilled
 from language_quality import apply_safe_language_fixes
 from media_audit import assert_rendered_media
 from repository_reader import enrich_github_article
-import concept_index
-import skill_generator
-
-# These imports belong to the separately distributed onepager/cards Skills.
-# Keep them optional so the deep-article package can be installed on its own.
-try:
-    from onepager_renderer import render_onepager_html, render_onepager_md
-except ModuleNotFoundError:
-    render_onepager_html = render_onepager_md = None
-try:
-    from card_renderer import render_card_deck_html, resolve_visual_system
-except ModuleNotFoundError:
-    render_card_deck_html = resolve_visual_system = None
-try:
-    from xhs_imagegen import enhance_xhs_images
-except ModuleNotFoundError:
-    enhance_xhs_images = None
-try:
-    from publish_shell import write_publish_shell
-except ModuleNotFoundError:
-    write_publish_shell = None
-
-
-def _load_mode_adapter(path: str | None, output_format: str):
-    """Load a single-output implementation supplied by a sibling skill."""
-    if not path:
-        return None
-    if output_format == "all":
-        raise ValueError("--mode-adapter 只支持单一输出格式，不能与 --format all 同用")
-    adapter_path = os.path.abspath(os.path.expanduser(path))
-    if not os.path.isfile(adapter_path):
-        raise ValueError(f"输出模式适配器不存在：{adapter_path}")
-    spec = importlib.util.spec_from_file_location("article_distiller_mode_adapter", adapter_path)
-    if spec is None or spec.loader is None:
-        raise ValueError(f"无法加载输出模式适配器：{adapter_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    mode = str(getattr(module, "MODE", "") or "")
-    if mode != output_format:
-        raise ValueError(
-            f"输出模式适配器声明 MODE={mode or '(空)'}，与 --format {output_format} 不一致"
-        )
-    required = (
-        "SYSTEM_PROMPT",
-        "EDITORIAL_REVIEW_PROMPT",
-        "audit_distilled",
-        "choose_preferred",
-        "assert_publishable",
-        "render_html",
-        "render_markdown",
-    )
-    missing = [name for name in required if not hasattr(module, name)]
-    if missing:
-        raise ValueError(f"输出模式适配器缺少接口：{', '.join(missing)}")
-    return module
-
-
-def _quality_api(args):
-    adapter = getattr(args, "mode_adapter", None)
-    return (
-        getattr(adapter, "audit_distilled", audit_distilled),
-        getattr(adapter, "assert_publishable", assert_publishable),
-    )
 
 
 def _ts() -> str:
@@ -602,69 +526,26 @@ def _source_counts(items: list[Article]) -> str:
     return f"官方附件 {counts.get('official', 0)} · 补充材料 {counts.get('supplemental', 0)} · 独立来源 {counts.get('independent', 0)}"
 
 
-def _write_output(html_str: str | None, md_str: str | None, output: str | None, ts: str):
-    """根据输出内容写文件，自动补后缀。"""
-    wrote = []
+def _write_output(html_str: str, output: str | None, ts: str) -> list[str]:
+    """写入唯一的 HTML 成品，并自动规范输出后缀。"""
     base = output or f"distilled-{ts}"
-
-    if html_str:
-        html_out = base if base.endswith(".html") else base + ".html"
-        with open(html_out, "w", encoding="utf-8") as f:
-            f.write(html_str)
-        wrote.append(html_out)
-
-    if md_str:
-        if base.endswith(".html"):
-            md_out = base[:-5] + ".md"
-        elif base.endswith(".md"):
-            md_out = base
-        else:
-            md_out = base + ".md"
-        with open(md_out, "w", encoding="utf-8") as f:
-            f.write(md_str)
-        wrote.append(md_out)
-
-    return wrote
-
-
-def _write_format_output(base: str, suffix: str, html_str: str | None, md_str: str | None) -> list:
-    """写指定格式的输出文件，文件名加 _{suffix} 后缀。"""
-    wrote = []
-    if html_str:
-        out = f"{base}_{suffix}.html"
-        with open(out, "w", encoding="utf-8") as f:
-            f.write(html_str)
-        wrote.append(out)
-    if md_str:
-        out = f"{base}_{suffix}.md"
-        with open(out, "w", encoding="utf-8") as f:
-            f.write(md_str)
-        wrote.append(out)
-    return wrote
+    if base.endswith((".md", ".markdown")):
+        base = os.path.splitext(base)[0]
+    html_out = base if base.endswith(".html") else base + ".html"
+    with open(html_out, "w", encoding="utf-8") as f:
+        f.write(html_str)
+    return [html_out]
 
 
 def _post_distill(article: Article, distilled: dict, args, ts: str) -> list:
-    """解读后处理：查互链 → 渲染 → 写文件 → 更新索引 → 生成 skill。
+    """渲染深度文章并写入目标文件。"""
 
-    返回写入的文件路径列表。
-    支持 --format 参数：full / onepager / cards / all。
-    """
-    fmt = getattr(args, "format", "full") or "full"
-
-    # 1. 查概念互链（渲染前查，这样当前文章也能显示已有相关文章）
-    related = None
-    if not args.no_index:
-        related = concept_index.find_related(article.to_dict(), distilled)
-        if related:
-            print(f"[概念互链] 找到 {len(related)} 篇相关文章")
-
-    # 2. 渲染
     base = args.output or f"distilled-{ts}"
     # 去掉后缀
     if base.endswith(".html"):
         base = base[:-5]
-    elif base.endswith(".md"):
-        base = base[:-3]
+    elif base.endswith((".md", ".markdown")):
+        base = os.path.splitext(base)[0]
 
     wrote = []
     image_artifacts = []
@@ -683,7 +564,7 @@ def _post_distill(article: Article, distilled: dict, args, ts: str) -> list:
             f"[长文解释配图警告] 已规划 {len(planned_illustrations)} 张解释图，但当前模式为 off，"
             "成品不会显示图片。已获用户生图授权时请使用 --article-images generate。"
         )
-    if fmt in ("full", "all") and article_image_mode != "off":
+    if article_image_mode != "off":
         try:
             image_result = enhance_article_images(
                 article,
@@ -705,102 +586,16 @@ def _post_distill(article: Article, distilled: dict, args, ts: str) -> list:
         }.get(article_image_mode, "图片提示词")
         print(f"[长文解释配图] 已准备 {len(image_result['items'])} 组{action}")
 
-    image_mode = getattr(args, "xhs_images", "off") or "off"
-    if fmt in ("cards", "all") and image_mode != "off":
-        requested_style = getattr(args, "xhs_style", "auto") or "auto"
-        visual_system = resolve_visual_system(distilled, requested_style)
-        try:
-            image_result = enhance_xhs_images(
-                article,
-                distilled,
-                base,
-                mode=image_mode,
-                visual_system=visual_system,
-                max_images=getattr(args, "xhs_image_count", 3),
-                size=getattr(args, "xhs_image_size", "1440x1920"),
-                relay_config=getattr(args, "relay_config", None),
-            )
-        except (OSError, ValueError, RuntimeError) as exc:
-            sys.exit(f"[小红书配图] {exc}")
-        image_artifacts.append(image_result["manifest"])
-        action = "图片与提示词" if image_mode == "generate" else "图片提示词"
-        print(f"[小红书配图] 已准备 {len(image_result['items'])} 组{action}")
-
-    if fmt in ("full", "all"):
-        html_str = None if fmt == "full" and args.md_only else render_html(article, distilled, related=related)
-        if html_str:
-            try:
-                media_render_audit = assert_rendered_media(article, distilled, html_str)
-            except ValueError as exc:
-                sys.exit(f"[媒体发布门禁] {exc}")
-            quality = distilled.get("editorial_quality") if isinstance(distilled.get("editorial_quality"), dict) else {}
-            distilled["editorial_quality"] = {**quality, "rendered_media_audit": media_render_audit}
-        md_str = None
-        if (args.both or fmt == "all") or (fmt == "full" and args.md_only):
-            md_str = render_md(article, distilled, related=related)
-        if fmt == "full":
-            # 单格式：用原来的命名逻辑
-            wrote.extend(_write_output(html_str, md_str, args.output, ts))
-        else:
-            # all 模式：加 _full 后缀
-            wrote.extend(_write_format_output(base, "full", html_str, md_str))
-
-    if fmt in ("onepager", "all"):
-        adapter = getattr(args, "mode_adapter", None)
-        html_renderer = getattr(adapter, "render_html", render_onepager_html)
-        markdown_renderer = getattr(adapter, "render_markdown", render_onepager_md)
-        op_html = html_renderer(article, distilled)
-        op_md = markdown_renderer(article, distilled)
-        if fmt == "onepager":
-            wrote.extend(_write_output(op_html, op_md, args.output, ts))
-        else:
-            wrote.extend(_write_format_output(base, "onepager", op_html, op_md))
-
-    if fmt in ("cards", "all"):
-        card_html = render_card_deck_html(article, distilled, style_override=getattr(args, "xhs_style", "auto"))
-        if fmt == "cards":
-            wrote.extend(_write_output(card_html, None, args.output, ts))
-        else:
-            wrote.extend(_write_format_output(base, "cards", card_html, None))
-
-    # 默认输出（防止 fmt 没匹配到任何分支）
-    if not wrote:
-        html_str = render_html(article, distilled, related=related)
-        wrote.extend(_write_output(html_str, None, args.output, ts))
-
-    if fmt == "all" and getattr(args, "publish_shell", False):
-        shell_path = base + ".html"
-        shell = write_publish_shell(
-            shell_path,
-            views={
-                "full": f"{base}_full.html",
-                "onepager": f"{base}_onepager.html",
-                "cards": f"{base}_cards.html",
-            },
-            markdown_paths={
-                "full": f"{base}_full.md",
-                "onepager": f"{base}_onepager.md",
-            },
-            title=str(distilled.get("distilled_title") or article.title or "文章解读"),
-            author=str(article.author or ""),
-            source_url=str(article.url or ""),
-            published_at=str(article.date or ""),
-        )
-        wrote.insert(0, shell)
-        print(f"[统一发布] 已生成多视图入口：{shell}")
+    html_str = render_html(article, distilled)
+    try:
+        media_render_audit = assert_rendered_media(article, distilled, html_str)
+    except ValueError as exc:
+        sys.exit(f"[媒体发布门禁] {exc}")
+    quality = distilled.get("editorial_quality") if isinstance(distilled.get("editorial_quality"), dict) else {}
+    distilled["editorial_quality"] = {**quality, "rendered_media_audit": media_render_audit}
+    wrote.extend(_write_output(html_str, args.output, ts))
 
     wrote.extend(image_artifacts)
-
-    # 3. 更新概念索引（渲染后更新，避免把自己当成相关文章）
-    if not args.no_index:
-        output_file = wrote[0] if wrote else ""
-        concept_index.update_index(article.to_dict(), distilled, output_file)
-        print(f"[概念索引] 已更新：{concept_index.get_index_stats()}")
-
-    # 4. 生成领域 skill
-    if args.gen_skill:
-        skill_path = skill_generator.generate_skill(article.to_dict(), distilled)
-        print(f"[领域 skill] 已生成：{skill_path}")
 
     return wrote
 
@@ -835,10 +630,7 @@ def cmd_full(args):
         flush=True,
     )
 
-    if args.format == "all":
-        required_modes = ("full", "onepager", "cards")
-    else:
-        required_modes = (args.format,)
+    required_modes = ("full",)
     distilled = normalize_distilled(
         distill(
             article,
@@ -847,7 +639,6 @@ def cmd_full(args):
             two_stage=not args.single_pass,
             editorial_review=not args.single_pass and not args.skip_editorial_review,
             required_modes=required_modes,
-            mode_adapter=getattr(args, "mode_adapter", None),
             checkpoint_dir=checkpoint_dir,
         ),
         article,
@@ -862,10 +653,9 @@ def cmd_full(args):
         "language_fix_count": len(all_fixes),
     }
     research = distilled.get("research_ledger") if isinstance(distilled.get("research_ledger"), dict) else None
-    audit, require_publishable = _quality_api(args)
-    normalized_audit = audit(distilled, research, required_modes, strict_editorial=True)
+    normalized_audit = audit_distilled(distilled, research, required_modes, strict_editorial=True)
     try:
-        require_publishable(normalized_audit, "证据规范化后的文章")
+        assert_publishable(normalized_audit, "证据规范化后的文章")
     except ValueError as exc:
         sys.exit(f"[质量门禁] {exc}")
     print("[2/3] AI 解读与编辑审校完成")
@@ -887,19 +677,13 @@ def cmd_source_only(args):
     evidence_articles = _get_evidence_articles(args, article)
     print(f"[1/2] 抓取完成：{article.title or '(无标题)'} · {article.text_chars} 字 · {_source_counts(evidence_articles)}")
 
-    required_modes = (args.format,) if args.format != "all" else ("full", "onepager", "cards")
+    required_modes = ("full",)
     prompt = build_manual_prompt(
         article,
         evidence_articles=evidence_articles,
         required_modes=required_modes,
-        mode_adapter=getattr(args, "mode_adapter", None),
     )
-    adapter = getattr(args, "mode_adapter", None)
-    editorial_prompt = getattr(
-        adapter,
-        "EDITORIAL_REVIEW_PROMPT",
-        _editorial_review_prompt_for_modes(required_modes),
-    )
+    editorial_prompt = _editorial_review_prompt_for_modes(required_modes)
     pack = {
         "article": article.to_dict(),
         "evidence_articles": [x.to_dict() for x in evidence_articles],
@@ -911,16 +695,7 @@ def cmd_source_only(args):
         json.dump(pack, f, ensure_ascii=False, indent=2)
     print(f"[2/2] 已生成解读 prompt 包：{out}")
     print("下一步：把 pack 里的 prompt 复制到任意 LLM 跑出 JSON，")
-    entrypoint = str(getattr(adapter, "ENTRYPOINT", "") or "") if adapter else ""
-    if entrypoint:
-        print(f"      再用：python {entrypoint} --render {out} distilled.json -o out")
-    elif DEEP_ONLY:
-        print(f"      再用：python run.py --render {out} distilled.json -o out --both")
-    else:
-        print(f"      再用：python distill.py --render {out} distilled.json -o out --format all")
-        print(f"      或正文版：python distill.py --render {out} distilled.json -o out --format full --both")
-        print(f"      或一页纸：python distill.py --render {out} distilled.json -o out --format onepager")
-        print(f"      或图文卡片：python distill.py --render {out} distilled.json -o out --format cards")
+    print(f"      再用：python run.py --render {out} distilled.json -o out")
 
 
 def cmd_render(args):
@@ -949,13 +724,9 @@ def cmd_render(args):
 
     distilled = normalize_distilled(distilled, article)
     distilled, render_fixes = apply_safe_language_fixes(distilled)
-    if args.format == "all":
-        required_modes = ("full", "onepager", "cards")
-    else:
-        required_modes = (args.format,)
+    required_modes = ("full",)
     research = distilled.get("research_ledger") if isinstance(distilled.get("research_ledger"), dict) else None
-    audit, require_publishable = _quality_api(args)
-    render_audit = audit(
+    render_audit = audit_distilled(
         distilled,
         research,
         required_modes,
@@ -963,7 +734,7 @@ def cmd_render(args):
         semantic_coverage_strict=False,
     )
     try:
-        require_publishable(render_audit, "待渲染文章")
+        assert_publishable(render_audit, "待渲染文章")
     except ValueError as exc:
         sys.exit(f"[质量门禁] {exc}")
     quality = distilled.get("editorial_quality") if isinstance(distilled.get("editorial_quality"), dict) else {}
@@ -980,59 +751,15 @@ def cmd_render(args):
     print(f"已生成：{', '.join(wrote)}")
 
 
-def cmd_index_stats():
-    stats = concept_index.get_index_stats()
-    print("=== 概念索引统计 ===")
-    for k, v in stats.items():
-        print(f"  {k}: {v}")
-    index = concept_index.list_all_concepts()
-    articles = index.get("articles", [])
-    if articles:
-        print(f"\n已索引文章（{len(articles)} 篇）：")
-        for a in articles:
-            print(f"  - {a.get('title', '?')}")
-            print(f"    URL: {a.get('url', '?')}")
-            print(f"    概念: {', '.join(a.get('concepts', []))}")
-
-
 def main():
     p = argparse.ArgumentParser(
-        description="把网页文章二次解读成图文 HTML / Markdown（article-distiller v9.16）",
+        description="把网页文章二次解读成图文 HTML（article-distiller v9.17）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("url", nargs="?", help="目标文章 URL，或本地 txt/md/html/pdf/docx/doc 文件路径")
     p.add_argument("--from-text", dest="from_text", help="从本地 txt/md/html/pdf/docx/doc 文件读取正文")
     p.add_argument("--config", help="config.json 路径（含 LLM 配置）")
-    p.add_argument("--output", "-o", help="输出文件路径（自动补 .html / .md 后缀）")
-    format_choices = ["full"] if DEEP_ONLY else ["full", "onepager", "cards", "all"]
-    format_help = "输出格式：full=深度文章（固定）" if DEEP_ONLY else "输出格式：full=正文版(默认) / onepager=一页纸版 / cards=图文卡片 / all=三态全出"
-    p.add_argument("--format", choices=format_choices, default="full", help=format_help)
-    if not DEEP_ONLY:
-        p.add_argument(
-            "--mode-adapter",
-            help="单一输出 Skill 的实现模块路径；由固定 Skill 入口传入",
-        )
-        p.add_argument(
-            "--publish-shell",
-            action="store_true",
-            help="为 --format all 生成统一多视图入口（不改写各视图内容）",
-        )
-        p.add_argument(
-            "--xhs-style",
-            choices=["auto", "classic", "guizang-editorial", "guizang-kraft", "guizang-swiss"],
-            default="auto",
-            help="小红书视觉系统（仅 cards/all 模式）",
-        )
-        p.add_argument(
-            "--xhs-images",
-            choices=["off", "prompts", "generate"],
-            default="off",
-            help="小红书配图（仅 cards/all 模式）",
-        )
-        p.add_argument("--xhs-image-count", type=int, default=3,
-                       help="封面加内容配图的总数，1-6（默认 3）")
-        p.add_argument("--xhs-image-size", default="1440x1920",
-                       help="relay-imagegen 输出尺寸（默认 1440x1920，3:4）")
+    p.add_argument("--output", "-o", help="HTML 输出文件路径（自动补 .html 后缀）")
     p.add_argument(
         "--article-images",
         choices=["off", "prompts", "generate", "reuse"],
@@ -1134,41 +861,10 @@ def main():
         action="store_true",
         help="调用研究+写作两阶段，但跳过第三次编辑审校",
     )
-    output_group = p.add_mutually_exclusive_group()
-    output_group.add_argument("--md", dest="md_only", action="store_true",
-                              help="只输出 Markdown（.md 文件），不输出 HTML（仅 full 格式有效）")
-    output_group.add_argument("--both", action="store_true",
-                              help="同时输出 HTML + Markdown（双文件，仅 full 格式有效）")
-    p.add_argument("--no-index", action="store_true",
-                   help="跳过概念索引更新和互链查询")
-    p.add_argument("--gen-skill", action="store_true",
-                   help="解读后自动生成领域 skill（.md 文件），让 AI 能按本文知识体系回答问题")
-    p.add_argument("--index-stats", action="store_true",
-                   help="查看概念索引统计信息")
     args = p.parse_args()
 
-    if DEEP_ONLY:
-        args.mode_adapter = None
-        args.publish_shell = False
-        args.xhs_images = "off"
-        args.xhs_image_count = 3
-        args.xhs_image_size = "1440x1920"
-    else:
-        try:
-            args.mode_adapter = _load_mode_adapter(args.mode_adapter, args.format)
-        except ValueError as exc:
-            p.error(str(exc))
-
-        if args.xhs_images != "off" and args.format not in {"cards", "all"}:
-            p.error("--xhs-images 只适用于 --format cards 或 --format all")
-        if args.publish_shell and args.format != "all":
-            p.error("--publish-shell 需要配合 --format all")
-    if args.article_images != "off" and args.format not in {"full", "all"}:
-        p.error("--article-images 只适用于 --format full 或 --format all")
     if args.article_images == "reuse" and not args.article_image_manifest:
         p.error("--article-images reuse 需要 --article-image-manifest")
-    if not DEEP_ONLY and not 1 <= args.xhs_image_count <= 6:
-        p.error("--xhs-image-count 必须在 1 到 6 之间")
     if not 1 <= args.article_image_count <= 3:
         p.error("--article-image-count 必须在 1 到 3 之间")
     if not 0 <= args.official_source_limit <= 5:
@@ -1176,16 +872,12 @@ def main():
     if not 0 <= args.repo_file_limit <= 8:
         p.error("--repo-file-limit 必须在 0 到 8 之间")
 
-    if args.index_stats:
-        cmd_index_stats()
-        return
-
     if args.render:
         cmd_render(args)
         return
 
     if not args.url and not args.from_text:
-        p.error("需要提供文章 URL 或本地文件，或用 --from-text / --render / --index-stats")
+        p.error("需要提供文章 URL 或本地文件，或用 --from-text / --render")
 
     if args.source_only:
         cmd_source_only(args)

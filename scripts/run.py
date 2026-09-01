@@ -5,17 +5,12 @@ from __future__ import annotations
 
 import runpy
 import sys
-import os
 from pathlib import Path
 
 from check_environment import check_environment, format_report
 
 
 SHARED_SCRIPT = Path(__file__).resolve().with_name("distill.py")
-
-
-def _has_format(argv: list[str]) -> bool:
-    return any(arg == "--format" or arg.startswith("--format=") for arg in argv)
 
 
 def _option_value(argv: list[str], name: str) -> str | None:
@@ -68,28 +63,11 @@ def _preflight(argv: list[str]) -> None:
         raise SystemExit(1)
 
 
-def build_shared_argv(argv: list[str]) -> list[str]:
-    if _has_format(argv):
-        raise ValueError("article-distiller 固定输出深度文章 full；请移除 --format")
-    if any(arg == "--mode-adapter" or arg.startswith("--mode-adapter=") for arg in argv):
-        raise ValueError("article-distiller 深度版不接受 --mode-adapter")
-    if any(arg == "--publish-shell" for arg in argv):
-        raise ValueError("统一发布壳层属于独立发布步骤，不由深度解读 Skill 生成")
-    if any(arg == "--xhs-images" or arg.startswith("--xhs-images=") for arg in argv):
-        raise ValueError("小红书配图属于 article-xhs-cards Skill")
-    return [*argv, "--format", "full"]
-
-
 def main(argv: list[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
     _preflight(args)
-    try:
-        shared_argv = build_shared_argv(args)
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
-    os.environ["ARTICLE_DISTILLER_DEEP_ONLY"] = "1"
     sys.path.insert(0, str(SHARED_SCRIPT.parent))
-    sys.argv = [str(SHARED_SCRIPT), *shared_argv]
+    sys.argv = [str(SHARED_SCRIPT), *args]
     runpy.run_path(str(SHARED_SCRIPT), run_name="__main__")
 
 
