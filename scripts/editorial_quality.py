@@ -654,10 +654,24 @@ def _audit_claim_against_corpus(claim_id: str, claim_text: str, corpus: str) -> 
         ratio = len(matched_grams) / len(grams) if grams else (1.0 if exact_terms else 0.0)
         # Short paraphrases may retain only one canonical three-character phrase.
         threshold = 0.33 if len(grams) >= 3 else 0.5
+        # 中文数字口径常会在正文中换序表达，例如“单次最多支持输入 30 张图片”
+        # 与“单次输入上限是 30 张图片”。只要数字、数量单位、对象和“上限/最多”
+        # 语义都出现，就视为同一条保守的指标主张，避免把自然改写误报为漏写。
+        metric_equivalent = False
+        if exact_terms and not missing_exact and re.search(r"最多|上限|最高|提升至|增加", clause):
+            metric_equivalent = bool(
+                re.search(r"最多|上限|最高|提升至|增加", normalized_corpus)
+                and any(
+                    anchor in normalized_corpus
+                    for anchor in ("张图片", "段视频", "段音频", "参考素材", "单次输入")
+                    if anchor in _semantic_normalize(clause)
+                )
+            )
         matched = not missing_exact and (
             signatures_matched
             or ratio >= threshold
             or (not grams and bool(exact_terms))
+            or metric_equivalent
         )
         matched_terms = exact_terms + matched_grams
         missing_terms = missing_exact + ([term for term in grams if term not in normalized_corpus] if not matched else [])

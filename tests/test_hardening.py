@@ -548,7 +548,7 @@ def test_three_stage_and_cost_modes():
     assert result["research_ledger"] == research
 
 
-def test_review_failure_and_version_selection():
+def test_review_failure_and_final_candidate_repair():
     research = {
         "claims": [{"id": "c1", "claim": "关键事实", "importance": "high"}],
         "unknowns": [],
@@ -561,9 +561,13 @@ def test_review_failure_and_version_selection():
 
     incomplete = {"distilled_title": "残缺修订稿", "sections": []}
     review = {"quality_report": {"coherence_score": 20}, "revised_article": incomplete}
-    result, _ = run_distill_with_fake([research, draft, review])
-    assert result["distilled_title"] == "可发布草稿"
-    assert result["editorial_quality"]["selected_version"] == "draft"
+    repaired = complete_draft("定向修复后的成稿", ["c1"])
+    repair = {"quality_report": {"coverage_score": 100}, "revised_article": repaired}
+    result, calls = run_distill_with_fake([research, draft, review, repair])
+    assert len(calls) == 4
+    assert result["distilled_title"] == "定向修复后的成稿"
+    assert result["editorial_quality"]["selected_version"] == "revised"
+    assert result["editorial_quality"]["repair_status"] == "completed"
 
 
 def test_research_json_fallback_still_reviews():
@@ -805,14 +809,28 @@ def test_quality_repair_runs_only_after_strict_gate_failure():
         "unknowns": [],
     }
     broken = complete_draft("缺口稿", ["c1"])
+    for index, section in enumerate(broken["sections"], 1):
+        section["id"] = f"s{index}"
     broken["sections"][0]["content"] = "关键一已经确认。"
     broken["sections"][1] = dict(broken["sections"][0])
     reviewed = {"quality_report": {}, "revised_article": broken}
 
     fixed = complete_draft("修复稿", ["c1", "c2"])
+    for index, section in enumerate(fixed["sections"], 1):
+        section["id"] = f"s{index}"
     fixed["sections"][0]["content"] = "关键一已经确认，先解释具体变化。"
     fixed["sections"][1]["content"] = "关键二说明机制如何承接这项变化。"
-    repair = {"quality_report": {"coverage_score": 100}, "revised_article": fixed}
+    repair = {
+        "quality_report": {"coverage_score": 100},
+        "article_patch": {
+            "set_fields": {
+                "distilled_title": "修复稿",
+                "editorial_coverage": fixed["editorial_coverage"],
+                "sections": fixed["sections"],
+            },
+            "section_updates": [],
+        },
+    }
 
     result, calls = run_distill_with_fake([research, broken, reviewed, repair])
     assert len(calls) == 4
@@ -821,6 +839,41 @@ def test_quality_repair_runs_only_after_strict_gate_failure():
     assert result["editorial_quality"]["final_audit"]["publishable"] is True
     repair_prompt = calls[-1]["messages"][-1]["content"]
     assert "meta_narration_section_indexes" in repair_prompt
+    assert "article_patch" in repair_prompt
+
+
+def test_final_quality_record_persists_audit_and_timings():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        distilled = {
+            "editorial_quality": {
+                "status": "completed",
+                "selected_version": "revised",
+                "stage_timings_seconds": {"研究阶段": 1.2, "写作阶段": 2.3},
+            }
+        }
+        audit = {"publishable": True, "score": 100, "blockers": []}
+        rendered = {"ok": True, "inventory_count": 2, "used_count": 2}
+        path = cli._save_quality_record(temp_dir, distilled, audit, rendered)
+        assert path == os.path.join(temp_dir, "final-quality.json")
+        record = json.loads(Path(path).read_text(encoding="utf-8"))
+        assert record["final_audit"] == audit
+        assert record["rendered_media_audit"] == rendered
+        assert record["stage_timings_seconds"]["写作阶段"] == 2.3
+
+
+def test_media_fingerprint_ignores_signed_and_decorative_assets():
+    article = article_from_text("正文", url="https://example.com/a", title="文章")
+    article.media_assets = [
+        {"id": "hero-1", "type": "video", "url": "https://cdn.example/demo.mp4?sig=one", "asset_role": "demo"},
+        {"id": "decor-1", "type": "image", "url": "https://cdn.example/footer.png?v=1", "asset_role": "other"},
+    ]
+    first = llm._stable_media_fingerprint(article)
+    article.media_assets[0]["url"] = "https://cdn.example/demo.mp4?sig=two"
+    article.media_assets[1]["url"] = "https://cdn.example/footer.png?v=2"
+    second = llm._stable_media_fingerprint(article)
+    assert first == second
+    article.media_assets[0]["url"] = "https://cdn.example/other-demo.mp4?sig=two"
+    assert first != llm._stable_media_fingerprint(article)
 
 
 def test_checkpoint_fingerprint_ignores_volatile_evidence_body():
@@ -875,10 +928,11 @@ if __name__ == "__main__":
     test_article_patch_validation_and_merge()
     test_patch_review_and_full_fallback_modes()
     test_three_stage_and_cost_modes()
-    test_review_failure_and_version_selection()
+    test_review_failure_and_final_candidate_repair()
     test_research_json_fallback_still_reviews()
     test_editorial_quality_gate()
     test_version_release_paraphrase_and_number_labels()
+    test_final_quality_record_persists_audit_and_timings()
     test_term_marker_follows_inline_translation()
     test_response_format_retry_boundary()
     test_streaming_response_is_assembled()

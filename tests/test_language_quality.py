@@ -228,10 +228,9 @@ def test_semantic_review_status_is_explicit() -> None:
     assert not any("语义级编辑审校" in item for item in checked_audit["warnings"])
 
 
-def test_version_selection_runs_after_safe_fixes() -> None:
+def test_final_candidate_runs_safe_fixes_before_unified_gate() -> None:
     draft = complete_draft("三项能力各自在减少哪一种制作断点")
-    revised = complete_draft("修订稿")
-    revised["sections"][1]["title"] = "三项能力各自在提升哪一类指标"
+    revised = complete_draft("三项能力各自在减少哪一种制作断点")
     review = {"quality_report": {}, "revised_article": revised}
 
     result, _ = run_distill_with_fake(
@@ -241,7 +240,7 @@ def test_version_selection_runs_after_safe_fixes() -> None:
         required_modes=("full",),
     )
     assert result["distilled_title"] == "三项能力分别解决哪类制作问题"
-    assert result["editorial_quality"]["selected_version"] == "draft"
+    assert result["editorial_quality"]["selected_version"] == "revised"
     assert result["editorial_quality"]["language_fix_count"] == 1
 
 
@@ -429,7 +428,7 @@ if __name__ == "__main__":
     test_redundant_equivalent_date_format_is_removed()
     test_clear_but_context_sensitive_fixes_block_auto_publish()
     test_semantic_review_status_is_explicit()
-    test_version_selection_runs_after_safe_fixes()
+    test_final_candidate_runs_safe_fixes_before_unified_gate()
     test_reader_voice_audit_is_advisory()
     test_human_voice_fingerprints_are_advisory()
     test_abstract_action_titles_are_advisory()

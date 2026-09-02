@@ -20,9 +20,11 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from fetcher import Article
-from editorial_quality import assert_publishable, audit_distilled, choose_preferred
+from editorial_quality import assert_publishable, audit_distilled
+from evidence import normalize_distilled, url_key
 from language_quality import apply_safe_language_fixes
 
 
@@ -60,6 +62,8 @@ _FULL_VOICE_GUIDE = """深度文章写作总纲：真实为底，讲透为骨，
 - 结尾必须回答开头问题；若开头有自然意象、结果或疑问，可回扣一次。删掉最后一段若更有力，就提前结束。
 - category_tags 输出 3-5 个用于长期归档的稳定大类名词，优先选择主体公司或机构、产品或模型家族、技术领域、应用领域、发布类型。中文标签 2-8 个汉字，纯英文不超过 12 个字符；不要写完整判断、动作、数据、证据边界或营销话术，也不要单独使用“AI、科技、行业”等无法有效归档的过宽词。
 - 有三项以上对比、明确时间顺序、多步机制、层级依赖、因果分支或数字关系时优先可视化；一句话能讲清时不硬加组件。先写 reader_question，再按关系选组件：音视频证据用播放器或来源媒体；平级异同用 compare_table；平行策略的作用对象与限制用 strategy_tabs；同一指标的旧版/新版或调整前后用 delta_table；多对象多维支持状态用 status_matrix；条件决定结果并对应行动用 decision_table；同一口径的数值排序用 rank_bars；多口径双方案数字用 metric_bars；上下层依赖用 layer_stack；普通先后动作或因果链用 flow，复杂阶段可用 stepper；资格逐关淘汰用 funnel_flow；日期演进用 timeline，阶段解释较多可用 scrubber；切换条件改变结果用 interactive_compare；可靠基数加读者假设用 scenario_calculator；连续变量出现拐点用 capacity_curve；不同计入项目改变结论用 cost_ledger。交互只有在读者操作后能看到关系、状态或结果变化时才使用，不设置交互组件数量配额。
+- 产品发布或模型演示若有多段内容不同的视频，先按“总览/首屏锚点、代表性案例、机制操作、前后差异、限制或应用场景”建立能力覆盖清单，再选择互补的 2-6 段；不因页面长度一刀切只留一段，也不为凑数量机械全收。正文开头明确依赖的首屏视频必须采用，或在 media_omissions 写出具体可核对的理由。
+- 原文出现真实提示词、时间码、参考素材分工、旧版基线或平台入口时，不只做抽象总结：把会改变读者判断的片段整理成紧凑指令卡、分镜时间线、参考素材分层、代际对比或平台状态表；不要整段复制长提示词，也不要让组件与正文重复同一事实。
 - 视觉布局先拆清维度，不能把整个组件粗暴判成“横向”或“纵向”。时间、流程、因果、前后变化和带解释的数字字段按主阅读顺序从上到下展开。`compare_table.data.layout` 按内容选择：叙事较长、需要强调每个主题时用 `paired`；列名固定、每行字段一致、需要快速逐行逐列扫视时用 `matrix` 表格；其余用 `stacked`。例如“环节 × Claude 职责 × 人的职责”应优先使用 `matrix`，窄屏允许单元格自然换行。
 - 视觉颜色只表达固定语义，不能为了丰富页面随机上色。`primary` 表示主方案、核心结果或正向进展，用绿色；`baseline` 表示对照方案，用蓝色；`warning` 表示限制、条件或待确认项，用琥珀色；`danger` 只用于材料明确支持的风险、失败或损失，用红色。`compare_table.data.column_roles` 与 headers 一一对应；主题列和没有明确语义的列写 `neutral` 或留空。`stat.data.items[].tone` 使用同一套角色。无法确定时保持中性色。
 """
@@ -331,6 +335,7 @@ def _editorial_review_prompt_for_modes(required_modes: tuple[str, ...]) -> str:
 - importance=high 的 claim 必须被覆盖或明确说明舍弃原因。
 - 不得新增研究账本和草稿中没有的事实、URL、数字、产品、价格或日期。
 - 逐一复核登记的重要视频和图片：只保留有信息增量的素材；外语媒体必须补准确中文图注与中文观看重点/读图提示，不得编造字幕或画面。
+- 复核媒体是否形成能力覆盖组合：首屏锚点、代表性案例、机制操作和前后差异等不同角色不要被“一段代表全部”替代；原文有真实提示词、时间码、参考分工、代际基线或平台状态时，补成紧凑可读组件，不把长原文整段塞进正文。
 - 不得提升来源证据等级；限制、反例和 unknowns 不得丢失。
 - 删除重复表达，保持事实、数字和比较口径一致。
 - 逐句先抽主干，再检查并列搭配、前后照应、成分残缺或赘余、句式杂糅、指代与歧义、句内逻辑、两面对一面、否定、关联词、数量范围和标点。每处区分“明确病句 / 存疑依赖语境 / 无明显语病”；明确病句做不改变事实的最小修改，存疑项只登记风险，不猜原意。不能把“通过……使……、是否/能否、由于……因此……”等表面形式机械判错，也不能把文风润色冒充语病修复。
@@ -402,6 +407,14 @@ def _editorial_patch_review_prompt_for_modes(required_modes: tuple[str, ...]) ->
 """
 
 
+QUALITY_REPAIR_PATCH_PROMPT = """你是发布前质量修复编辑。你会收到当前完整文章、研究证据账本和确定性门禁阻断项。
+只修复阻断项，不重写无关内容，不新增材料外事实、URL、数字、产品、价格或日期；必须保留当前文章已有的媒体登记、省略理由、数字来源、证据等级、限制和章节结构。
+输出 JSON：{"quality_report":{"problems_fixed":["实际修复"],"remaining_risks":["仍无法解决的问题"]},"article_patch":{"set_fields":{},"section_updates":[]}}。
+set_fields 只放需要替换的完整顶层字段；修改已有章节优先放 section_updates，每项包含已有 section id 和实际修改字段。不得修改 research_ledger、editorial_quality。
+如果阻断项是语义覆盖，必须把事实写进读者可见的章节、实验、案例、数字故事或视觉字段；如果是媒体或数字登记问题，必须修正对应的 source_media、media_omissions、number_stories 或 evidence_gallery 字段。不要返回完整 revised_article。
+"""
+
+
 def _apply_article_patch(draft: dict, patch: dict) -> dict:
     """Apply a constrained top-level/section patch without losing untouched data."""
     if not isinstance(draft, dict) or not isinstance(patch, dict):
@@ -457,6 +470,74 @@ def _apply_article_patch(draft: dict, patch: dict) -> dict:
     return result
 
 
+def _merge_repair_candidate(base: dict, repaired: dict, article: Article) -> dict:
+    """合并定向修复稿，避免修复模型丢失已登记的证据和媒体决策。
+
+    质量修复只应改阻断项。模型返回完整 JSON 时，字段遗漏、空列表或略写来源
+    不应把已经通过前一阶段的媒体对账、数字来源和证据记录一起删除。
+    """
+    if not isinstance(base, dict) or not isinstance(repaired, dict):
+        return copy.deepcopy(repaired)
+    result = copy.deepcopy(base)
+    known_urls = {url_key(str(getattr(article, "url", "") or ""))}
+    for source in getattr(article, "source_links", []) or []:
+        if isinstance(source, dict):
+            key = url_key(str(source.get("url") or ""))
+            if key:
+                known_urls.add(key)
+    for asset in getattr(article, "media_assets", []) or []:
+        if isinstance(asset, dict):
+            for value in (asset.get("url"), asset.get("source_url")):
+                key = url_key(str(value or ""))
+                if key:
+                    known_urls.add(key)
+
+    keyed_lists = {
+        "source_media": "media_id",
+        "media_omissions": "media_id",
+        "evidence_gallery": "media_id",
+        "number_stories": "id",
+    }
+    for key, value in repaired.items():
+        if key in {"research_ledger", "editorial_quality"}:
+            continue
+        if key not in keyed_lists or not isinstance(value, list):
+            result[key] = copy.deepcopy(value)
+            continue
+        previous = result.get(key)
+        if not isinstance(previous, list):
+            result[key] = copy.deepcopy(value)
+            continue
+        if not value and previous:
+            continue
+        id_field = keyed_lists[key]
+        merged = {
+            str(item.get(id_field) or ""): copy.deepcopy(item)
+            for item in previous
+            if isinstance(item, dict) and str(item.get(id_field) or "")
+        }
+        order = list(merged)
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            item_copy = copy.deepcopy(item)
+            item_id = str(item_copy.get(id_field) or "")
+            if key == "number_stories" and item_id:
+                old = merged.get(item_id) or {}
+                new_url = url_key(str(item_copy.get("source_url") or ""))
+                old_url = url_key(str(old.get("source_url") or ""))
+                if old_url in known_urls and new_url not in known_urls:
+                    item_copy["source_url"] = old.get("source_url")
+                if old.get("source_asset_ids") and not item_copy.get("source_asset_ids"):
+                    item_copy["source_asset_ids"] = copy.deepcopy(old["source_asset_ids"])
+            if item_id and item_id not in merged:
+                order.append(item_id)
+            if item_id:
+                merged[item_id] = item_copy
+        result[key] = [merged[item_id] for item_id in order]
+    return result
+
+
 def _review_output_mode() -> str:
     explicit = os.getenv("DISTILL_REVIEW_OUTPUT_MODE", "").strip().lower()
     if explicit in {"patch", "full"}:
@@ -507,10 +588,19 @@ def _build_draft_context(
         item for item in (getattr(article, "source_links", []) or [])
         if isinstance(item, dict) and (item.get("fetched") or item.get("url") == article.url)
     ][:16]
-    media_assets = [
-        item for item in (getattr(article, "media_assets", []) or [])
-        if isinstance(item, dict)
-    ][:16]
+    media_assets = []
+    for item in (getattr(article, "media_assets", []) or []):
+        if not isinstance(item, dict):
+            continue
+        # 只把模型真正需要做取舍的媒体元数据送入写作阶段，避免把网络请求、
+        # CSS 背景图等重复的长字段塞进提示词。
+        media_assets.append({
+            key: item.get(key)
+            for key in ("id", "type", "url", "poster_url", "alt", "section_title", "asset_role")
+            if item.get(key)
+        })
+        if len(media_assets) >= 16:
+            break
     context += (
         f"可用来源链接：{json.dumps(source_links, ensure_ascii=False)}\n"
         f"可用来源媒体：{json.dumps(media_assets, ensure_ascii=False)}\n\n"
@@ -525,7 +615,48 @@ def _build_draft_context(
     return context
 
 
-_PIPELINE_CACHE_VERSION = "article-distiller-stage-cache-v1"
+_PIPELINE_CACHE_VERSION = "article-distiller-stage-cache-v2"
+
+
+def _stable_asset_url(value: str) -> str:
+    """去掉签名 query，避免动态媒体每次加载造成阶段缓存失效。"""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parts = urlsplit(raw)
+        if parts.scheme and parts.netloc:
+            return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, "", ""))
+    except ValueError:
+        pass
+    return raw.split("?", 1)[0].split("#", 1)[0]
+
+
+def _stable_media_fingerprint(article: Article) -> list[dict]:
+    """只用重要媒体的稳定身份参与缓存指纹，不让装饰素材和签名 URL 触发重跑。"""
+    important_roles = {"chart", "demo", "hero", "screenshot"}
+    seen: set[tuple[str, str]] = set()
+    items = []
+    for item in (getattr(article, "media_assets", []) or []):
+        if not isinstance(item, dict) or not item.get("url"):
+            continue
+        media_type = str(item.get("type") or "").lower()
+        role = str(item.get("asset_role") or "").lower()
+        if role not in important_roles and media_type not in {"video", "audio"}:
+            continue
+        stable_url = _stable_asset_url(str(item.get("url") or ""))
+        key = (media_type, stable_url)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append({
+            "type": media_type,
+            "url": stable_url,
+            "poster_url": _stable_asset_url(str(item.get("poster_url") or "")),
+            "asset_role": role,
+            "source_url": _stable_asset_url(str(item.get("source_url") or "")),
+        })
+    return sorted(items, key=lambda item: (item["type"], item["url"], item["asset_role"]))
 
 
 def _hash_payload(value) -> str:
@@ -554,22 +685,7 @@ def _article_fingerprint_data(article: Article, include_content: bool = True) ->
     }
     if include_content:
         data["content_hash"] = getattr(article, "content_hash", "") or _hash_payload(article.text)
-        data["media_assets"] = sorted(
-            [
-                {
-                    "id": item.get("id"),
-                    "type": item.get("type"),
-                    "url": item.get("url"),
-                    "poster_url": item.get("poster_url"),
-                    "alt": item.get("alt"),
-                    "section_title": item.get("section_title"),
-                    "asset_role": item.get("asset_role"),
-                }
-                for item in (getattr(article, "media_assets", []) or [])
-                if isinstance(item, dict) and item.get("url")
-            ],
-            key=lambda item: (str(item.get("id")), str(item.get("url"))),
-        )
+        data["media_assets"] = _stable_media_fingerprint(article)
     return data
 
 
@@ -861,6 +977,15 @@ def distill(
     cfg["_retry_delay_seconds"] = retry_delay_default
     cfg["_retry_max_wait_seconds"] = retry_wait_default
     cfg["_stream"] = stream_default
+    stage_timings: dict[str, float] = {}
+
+    def call_stage(system_prompt: str, user_prompt: str, temperature: float, stage: str) -> dict:
+        started = time.monotonic()
+        try:
+            return _call_json(client, cfg, system_prompt, user_prompt, temperature, stage=stage)
+        finally:
+            stage_timings[stage] = round(time.monotonic() - started, 3)
+
     client_kwargs = {
         "base_url": cfg["base_url"],
         "api_key": cfg["api_key"],
@@ -873,9 +998,7 @@ def distill(
     if two_stage:
         if research is None:
             try:
-                research = _call_json(
-                    client,
-                    cfg,
+                research = call_stage(
                     RESEARCH_PROMPT,
                     user_prompt,
                     temperature=0.1,
@@ -903,9 +1026,7 @@ def distill(
         checkpoint_dir, "writing", fingerprint, parent_hash=research_hash
     )
     if draft is None:
-        draft = _call_json(
-            client,
-            cfg,
+        draft = call_stage(
             writing_system_prompt,
             editorial_prompt,
             temperature=0.35,
@@ -917,17 +1038,6 @@ def distill(
     result = draft
     review_meta: dict = {"status": "skipped", "selected_version": "draft"}
     selected_language_fixes: list[dict] = []
-    review_trigger_audit = None
-    if editorial_review and review_output_mode == "patch" and review_trigger_audit is None:
-        probe_draft, _ = apply_safe_language_fixes(draft)
-        review_trigger_audit = audit_distilled(
-            probe_draft, research, required_modes, strict_editorial=True
-        )
-        print(
-            f"[编辑审校阶段] 已把 {len(review_trigger_audit.get('blockers') or [])} 个"
-            "本地门禁阻断项加入补丁审校上下文",
-            flush=True,
-        )
     if editorial_review:
         try:
             ledger_limit = 40000
@@ -938,39 +1048,19 @@ def distill(
                 + _serialize_research_ledger(research or {}, max_chars=ledger_limit)
                 + "\n\n--- 待审校完整草稿 ---\n"
                 + _serialize_draft(draft)
-                + (
-                    "\n\n--- 本地门禁阻断项 ---\n"
-                    + json.dumps({
-                        "blockers": review_trigger_audit.get("blockers") or [],
-                        "warnings": review_trigger_audit.get("warnings") or [],
-                        "metrics": {
-                            key: value
-                            for key, value in (review_trigger_audit.get("metrics") or {}).items()
-                            if key in {
-                                "unsupported_numbers",
-                                "semantically_missing_high_claim_ids",
-                                "missing_high_metric_story_ids",
-                                "incomplete_number_story_ids",
-                                "incomplete_high_metric_story_claim_ids",
-                                "meta_narration_section_indexes",
-                                "meta_narration_public_paths",
-                            }
-                        },
-                    }, ensure_ascii=False)
-                    if review_trigger_audit
-                    else ""
-                )
             )
             if review_output_mode == "patch":
                 review_prompt = (
                     review_context
-                    + "\n\n请逐项消除本地门禁阻断项，返回 quality_report 和 article_patch。"
+                    + "\n\n请完整审校草稿，修复你发现的事实覆盖、结构、表达、语病、媒体和视觉组织问题，"
+                    "返回 quality_report 和 article_patch。"
                     "只回传实际修改字段，不要回传未修改内容。"
                 )
             else:
                 review_prompt = (
                     review_context
-                    + "\n\n请逐项消除本地门禁阻断项并返回完整 revised_article，"
+                    + "\n\n请完整审校草稿，修复你发现的事实覆盖、结构、表达、语病、媒体和视觉组织问题，"
+                    "并返回完整 revised_article，"
                     "不要只返回修改建议或局部字段。"
                 )
             review_parent_hash = _hash_payload({
@@ -982,9 +1072,7 @@ def distill(
                 checkpoint_dir, "review", fingerprint, parent_hash=review_parent_hash
             )
             if reviewed is None:
-                reviewed = _call_json(
-                    client,
-                    cfg,
+                reviewed = call_stage(
                     review_system_prompt,
                     review_prompt,
                     temperature=0.15,
@@ -1020,9 +1108,7 @@ def distill(
                     parent_hash=fallback_parent_hash,
                 )
                 if fallback is None:
-                    fallback = _call_json(
-                        client,
-                        cfg,
+                    fallback = call_stage(
                         full_review_system_prompt,
                         fallback_prompt,
                         temperature=0.15,
@@ -1061,21 +1147,16 @@ def distill(
                 actual_review_output_mode = "full_fallback"
             else:
                 raise ValueError("编辑审校阶段缺少完整 revised_article 对象")
-            fixed_draft, draft_language_fixes = apply_safe_language_fixes(draft)
             fixed_revised, revised_language_fixes = apply_safe_language_fixes(revised)
-            result, selected, draft_audit, revised_audit = choose_preferred(
-                fixed_draft, fixed_revised, research, required_modes
-            )
-            selected_language_fixes = (
-                revised_language_fixes if selected == "revised" else draft_language_fixes
-            )
+            result = fixed_revised
+            selected = "revised"
+            selected_language_fixes = revised_language_fixes
             review_meta = {
                 "status": "completed",
                 "selected_version": selected,
                 "output_mode": actual_review_output_mode,
                 "model_report": reviewed.get("quality_report") if isinstance(reviewed.get("quality_report"), dict) else {},
-                "draft_audit": draft_audit,
-                "revised_audit": revised_audit,
+                "selection_basis": "审校稿默认进入成稿后统一质检；不在写作过程中重复运行完整门禁",
             }
         except ValueError as exc:
             print(f"[编辑审校警告] {exc}；将检查草稿是否达到发布门槛。", file=sys.stderr)
@@ -1088,7 +1169,9 @@ def distill(
 
     result, final_language_fixes = apply_safe_language_fixes(result)
     language_fixes = selected_language_fixes + final_language_fixes
-    result = dict(result)
+    # 统一门禁必须在来源、媒体和数字字段完成确定性规范化后运行；否则
+    # 原始 LLM JSON 中尚未补齐的 registered 标记会被误判为未登记素材。
+    result = normalize_distilled(dict(result), article)
     final_audit = audit_distilled(result, research, required_modes, strict_editorial=True)
 
     if editorial_review and not final_audit.get("publishable"):
@@ -1096,7 +1179,7 @@ def distill(
             "research": research or {},
             "result": result,
             "blockers": final_audit.get("blockers") or [],
-            "full_review_prompt_hash": _hash_payload(full_review_system_prompt),
+            "repair_prompt_hash": _hash_payload(QUALITY_REPAIR_PATCH_PROMPT),
         })
         repair_prompt = (
             "--- 原文标题 ---\n"
@@ -1119,12 +1202,12 @@ def distill(
                     }
                 },
             }, ensure_ascii=False)
-            + "\n\n--- 研究证据账本 ---\n"
-            + _serialize_research_ledger(research or {}, max_chars=24000)
+            + "\n\n--- 研究证据账本（仅保留修复所需口径） ---\n"
+            + _serialize_research_ledger(research or {}, max_chars=12000)
             + "\n\n--- 当前完整文章 ---\n"
-            + _serialize_draft(result)
+            + _serialize_draft(result, max_chars=36000)
             + "\n\n只修复上述阻断项，不删减已经通过的事实、实验、案例、来源和边界。"
-            "请返回完整修订稿，不要只给建议或局部字段。"
+            "请返回可确定合并的 article_patch，不要返回完整 revised_article。"
         )
         print(
             f"[质量修复阶段] 严格门禁仍有 {len(final_audit.get('blockers') or [])} 个阻断项，"
@@ -1134,10 +1217,8 @@ def distill(
             checkpoint_dir, "repair", fingerprint, parent_hash=repair_parent_hash
         )
         if repaired_response is None:
-            repaired_response = _call_json(
-                client,
-                cfg,
-                full_review_system_prompt,
+            repaired_response = call_stage(
+                QUALITY_REPAIR_PATCH_PROMPT,
                 repair_prompt,
                 temperature=0.1,
                 stage="质量修复阶段",
@@ -1149,20 +1230,21 @@ def distill(
                 repaired_response,
                 parent_hash=repair_parent_hash,
             )
-        repaired = repaired_response.get("revised_article")
+        repair_patch = repaired_response.get("article_patch")
+        repaired = None
+        if isinstance(repair_patch, dict):
+            repaired = _apply_article_patch(result, repair_patch)
+        elif isinstance(repaired_response.get("revised_article"), dict):
+            # 兼容旧缓存/旧端点，但新请求协议默认只返回 patch。
+            repaired = _merge_repair_candidate(result, repaired_response["revised_article"], article)
         if isinstance(repaired, dict):
             fixed_repaired, repair_language_fixes = apply_safe_language_fixes(repaired)
-            result, repaired_selected, current_audit, repaired_audit = choose_preferred(
-                result, fixed_repaired, research, required_modes
-            )
-            if repaired_selected == "revised":
-                language_fixes += repair_language_fixes
+            result = normalize_distilled(fixed_repaired, article)
+            language_fixes += repair_language_fixes
             review_meta = {
                 **review_meta,
                 "repair_status": "completed",
-                "repair_selected_version": repaired_selected,
-                "pre_repair_audit": current_audit,
-                "repair_audit": repaired_audit,
+                "repair_selected_version": "revised",
                 "repair_model_report": repaired_response.get("quality_report")
                 if isinstance(repaired_response.get("quality_report"), dict)
                 else {},
@@ -1172,7 +1254,7 @@ def distill(
             review_meta = {
                 **review_meta,
                 "repair_status": "invalid_response",
-                "repair_error": "质量修复阶段缺少完整 revised_article 对象",
+                "repair_error": "质量修复阶段缺少可合并的 article_patch 对象",
             }
 
     assert_publishable(final_audit, "编辑审校后的文章")
@@ -1180,6 +1262,7 @@ def distill(
         **review_meta,
         "language_fixes": language_fixes,
         "language_fix_count": len(language_fixes),
+        "stage_timings_seconds": stage_timings,
         "final_audit": final_audit,
     }
     if research is not None:

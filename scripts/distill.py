@@ -537,7 +537,48 @@ def _write_output(html_str: str, output: str | None, ts: str) -> list[str]:
     return [html_out]
 
 
-def _post_distill(article: Article, distilled: dict, args, ts: str) -> list:
+def _save_quality_record(
+    checkpoint_dir: str | None,
+    distilled: dict,
+    final_audit: dict | None = None,
+    rendered_media_audit: dict | None = None,
+) -> str | None:
+    """Persist a compact internal quality record without exposing audit fields in HTML."""
+    if not checkpoint_dir:
+        return None
+    quality = distilled.get("editorial_quality") if isinstance(distilled.get("editorial_quality"), dict) else {}
+    record = {
+        "version": 1,
+        "created_at": time.time(),
+        "status": quality.get("status", "unknown"),
+        "selected_version": quality.get("selected_version", "unknown"),
+        "output_mode": quality.get("output_mode", "unknown"),
+        "repair_status": quality.get("repair_status", "skipped"),
+        "repair_selected_version": quality.get("repair_selected_version"),
+        "language_fix_count": quality.get("language_fix_count", 0),
+        "stage_timings_seconds": quality.get("stage_timings_seconds", {}),
+        "final_audit": final_audit or quality.get("final_audit") or quality.get("render_audit") or {},
+        "rendered_media_audit": rendered_media_audit or quality.get("rendered_media_audit") or {},
+    }
+    directory = os.path.abspath(checkpoint_dir)
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, "final-quality.json")
+    temporary = os.path.join(directory, f".final-quality.{os.getpid()}.tmp")
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(record, handle, ensure_ascii=False, indent=2)
+    os.replace(temporary, path)
+    print(f"[质量记录] 已保存最终审计与阶段耗时：{path}")
+    return path
+
+
+def _post_distill(
+    article: Article,
+    distilled: dict,
+    args,
+    ts: str,
+    quality_record_dir: str | None = None,
+    final_audit: dict | None = None,
+) -> list:
     """渲染深度文章并写入目标文件。"""
 
     base = args.output or f"distilled-{ts}"
@@ -595,6 +636,13 @@ def _post_distill(article: Article, distilled: dict, args, ts: str) -> list:
     distilled["editorial_quality"] = {**quality, "rendered_media_audit": media_render_audit}
     wrote.extend(_write_output(html_str, args.output, ts))
 
+    _save_quality_record(
+        quality_record_dir,
+        distilled,
+        final_audit=final_audit,
+        rendered_media_audit=media_render_audit,
+    )
+
     wrote.extend(image_artifacts)
 
     return wrote
@@ -651,6 +699,7 @@ def cmd_full(args):
         **quality,
         "language_fixes": all_fixes,
         "language_fix_count": len(all_fixes),
+        "final_audit": normalized_audit,
     }
     research = distilled.get("research_ledger") if isinstance(distilled.get("research_ledger"), dict) else None
     normalized_audit = audit_distilled(distilled, research, required_modes, strict_editorial=True)
@@ -661,7 +710,14 @@ def cmd_full(args):
     print("[2/3] AI 解读与编辑审校完成")
 
     ts = _ts()
-    wrote = _post_distill(article, distilled, args, ts)
+    wrote = _post_distill(
+        article,
+        distilled,
+        args,
+        ts,
+        quality_record_dir=checkpoint_dir,
+        final_audit=normalized_audit,
+    )
     print(f"已生成：{', '.join(wrote)}")
 
 
@@ -747,7 +803,14 @@ def cmd_render(args):
         "render_audit": render_audit,
     }
     ts = _ts()
-    wrote = _post_distill(article, distilled, args, ts)
+    wrote = _post_distill(
+        article,
+        distilled,
+        args,
+        ts,
+        quality_record_dir=_stage_checkpoint_dir(args, article),
+        final_audit=render_audit,
+    )
     print(f"已生成：{', '.join(wrote)}")
 
 

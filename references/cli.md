@@ -27,7 +27,7 @@ LLM 配置优先级：环境变量、显式配置文件、ccswitch 当前 Codex 
 ## 常用命令
 
 ```bash
-# 深度文章 HTML；默认执行研究、写作、主编审校
+# 深度文章 HTML；默认执行研究、写作、主编审校，随后统一进行成稿质量门禁
 $PY "$SKILL_ROOT/scripts/run.py" <URL> -o article
 
 # PDF、Word 或本地正文
@@ -57,7 +57,7 @@ $PY "$SKILL_ROOT/scripts/run.py" <URL> --article-images generate \
 
 - 输出固定为一个 `.html` 文件；深度版不接受额外输出格式参数。
 - `--source-only`：只抓取材料并生成 prompt 包，不调用 LLM。
-- `--render PACK DISTILLED`：使用已有材料包和解读 JSON 渲染，仍执行确定性证据与质量门禁。
+- `--render PACK DISTILLED`：使用已有材料包和解读 JSON 渲染，仍执行确定性证据与质量门禁。由于此模式没有写作阶段，门禁直接作用于传入的成稿 JSON。
 - `--page-assets FILE`：合并浏览器导出的来源与媒体清单；候选链接仍须成功读取后才算证据。
 - `--no-dynamic-media`：显式跳过动态媒体发现，仅在用户接受可能遗漏时使用。
 - `--dynamic-media-timeout MS`：动态检查超时，默认 25000 毫秒。
@@ -70,6 +70,8 @@ $PY "$SKILL_ROOT/scripts/run.py" <URL> --article-images generate \
 - `--skip-editorial-review`：保留研究和写作，跳过主编审校。
 - `--single-pass`：只调用一次写作模型，与 `--skip-editorial-review` 互斥。
 - `--stage-cache-dir`、`--no-stage-cache`：指定或关闭来源与模型阶段缓存。
+
+每次完整运行或 `--render` 成功后，运行时缓存目录会写入 `final-quality.json`，记录最终质量门禁、媒体渲染对账、语言修复数量和各模型阶段耗时；这些内部记录不会写入 HTML 可见区域。
 
 ## 缓存与运行时数据
 
