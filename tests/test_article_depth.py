@@ -166,6 +166,23 @@ def test_quick_scan_is_a_real_one_minute_guide():
     assert "180 字以内" in str(audit["blockers"])
 
 
+def test_public_copy_warns_on_audit_tone_but_keeps_natural_boundaries_publishable():
+    payload = base_payload()
+    payload["quick_scan"] = [
+        "这是一个把风险路径讲清楚的研究。",
+        "它解释消息为什么会从普通输入变成高优先级上下文。",
+        "独立评测尚未完成，适合用来理解机制，不宜当成现实发生率。",
+    ]
+    audit = audit_distilled(payload, RESEARCH, ("full",), strict_editorial=True)
+    assert audit["publishable"], audit
+    assert audit["metrics"]["public_audit_tone_paths"] == ["$.quick_scan[2]"]
+    assert any("审计式过程或验证口吻" in item for item in audit["warnings"])
+
+    payload["quick_scan"][2] = "它适合用来理解机制，但不能直接当成现实发生率。"
+    natural = audit_distilled(payload, RESEARCH, ("full",), strict_editorial=True)
+    assert natural["metrics"]["public_audit_tone_paths"] == []
+
+
 def test_category_tags_are_short_archival_categories():
     payload = base_payload()
     payload["category_tags"] = ["Google", "Gemini", "语音识别", "语音交互"]
@@ -190,5 +207,6 @@ if __name__ == "__main__":
     test_non_research_article_needs_no_synthetic_experiment_or_case()
     test_strict_gate_rejects_meta_narration_in_article_body()
     test_quick_scan_is_a_real_one_minute_guide()
+    test_public_copy_warns_on_audit_tone_but_keeps_natural_boundaries_publishable()
     test_category_tags_are_short_archival_categories()
     print("article depth tests passed")

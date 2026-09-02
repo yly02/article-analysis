@@ -20,6 +20,10 @@ META_NARRATION_RE = re.compile(
     r"(?:本文|原文|原博客|这篇文章|当前材料|本次材料|发布稿)(?:真正|反复|重点|还|又|只|足以|没有|未|把|要|将|的主线|说|称|提到|指出|显示|补充|提供|陈述|说明)?",
     flags=re.UNICODE,
 )
+PUBLIC_AUDIT_TONE_RE = re.compile(
+    r"(?:本次读取|抓取状态|研究账本|运行日志|评判器|门禁结果|样本核对|样本量|独立评测|质量已经得到验证|不能据此推出)",
+    flags=re.UNICODE,
+)
 
 SEMANTIC_ALIAS_PATTERNS = (
     (re.compile(r"(?:不会|不再|无需|不需要|没有)(?:额外)?(?:消耗|新增|增加|使用)"), "不增加"),
@@ -954,6 +958,15 @@ def audit_distilled(
             for path, value in _walk_public_text(distilled.get(field), (field,)):
                 if META_NARRATION_RE.search(value):
                     meta_narration_public_paths.append(_public_path(path))
+        public_audit_tone_paths = []
+        for field in (
+            "quick_scan", "one_liner", "recommendation_reason", "sections",
+            "experiment_ledger", "case_stories", "number_stories", "visuals",
+            "action_card", "takeaway_list",
+        ):
+            for path, value in _walk_public_text(distilled.get(field), (field,)):
+                if PUBLIC_AUDIT_TONE_RE.search(value):
+                    public_audit_tone_paths.append(_public_path(path))
         original_quote_count = sum(
             1
             for section in sections
@@ -975,6 +988,7 @@ def audit_distilled(
             "thin_section_indexes": thin_sections,
             "meta_narration_section_indexes": meta_narration_sections,
             "meta_narration_public_paths": meta_narration_public_paths,
+            "public_audit_tone_paths": public_audit_tone_paths,
             "original_quote_count": original_quote_count,
             "human_narrative_complete": human_narrative_complete,
             "missing_human_strategy_fields": missing_human_strategy_fields,
@@ -1037,6 +1051,11 @@ def audit_distilled(
             (blockers if strict_editorial else warnings).append(
                 "发布内容存在写作过程自述，请改为直接面向读者的自然表达："
                 f"{meta_narration_public_paths}"
+            )
+        if public_audit_tone_paths:
+            warnings.append(
+                "公开内容出现审计式过程或验证口吻；请把必要边界改写成贴近事实的普通表达，其余信息留在后台："
+                f"{public_audit_tone_paths}"
             )
         if original_quote_count > 2:
             (blockers if strict_editorial else warnings).append(
