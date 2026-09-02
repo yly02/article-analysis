@@ -49,6 +49,8 @@ _FULL_VOICE_GUIDE = """深度文章写作总纲：真实为底，讲透为骨，
 - 解释型文章优先采用“具体处境/例子 -> 它为什么反常 -> 一句核心判断 -> 机制与规则”的进入顺序。先让读者看见问题，再介绍仓库、参数或目录；一句有记忆点的判断后必须紧跟具体动作、例子或证据，不能让金句替代论证。
 - 规则和参数先写成读者能想象的动作，再给专业名词、比例或实现细节；抽象规则至少配一个真实例子或准确类比。若一段同时承担事实、技术、边界和许可说明，拆成相邻短段，并把边界贴回它约束的主张。
 - 章节标题按问题、动作、结果或选择标记推进，避免把正文切成“背景、分析、影响、总结”的空分类；读者只看标题也应能复述从问题进入到最终判断的主线。
+- 全文至少保留一句能被读者复述的“钉子判断”，把材料中的机制或矛盾重新命名；只出现一两次，并用具体动作、例子或证据兑现，不能反复当口号。
+- 抽象规则先落到“谁在什么场景下做了什么”，再补比例、目录、脚本或术语。若找不到对应动作或画面，删掉规则或改成普通解释，不硬塞技术名词。
 - 动笔前做一次 HKR 预检：选题是否有趣、是否有新知识、是否有材料支持的真实连接点。没有第一手经历时，不用虚构个人情绪，改用材料中的处境、冲突、取舍或后果建立共鸣。
 - 多个模型、案例、报价或测试结果采用“逐一展示 + 升番”递进：先给基础现象，再给更明显的差异，最后保留最能改变判断的结果；每项只补事实性观察，不用吐槽制造材料外信息。
 - 背景知识要像聊天时顺手想起的一块拼图，从当前例子自然引出；不要另起“科普一下”小节，不要为了哲学感强接文化参照物。
@@ -143,7 +145,7 @@ FULL_SYSTEM_PROMPT = _COMMON_MODE_RULES + _FULL_VOICE_GUIDE + """
   }],
   "visuals": [{"type": "compare_table|strategy_tabs|delta_table|status_matrix|decision_table|rank_bars|metric_bars|layer_stack|flow|funnel_flow|stat|timeline|interactive_compare|scenario_calculator|capacity_curve|cost_ledger", "title": "标题", "after_section_id": "section id", "reader_question": "这个组件替读者回答什么问题", "data": {}}],
   "illustration_plan": [{"id": "ASCII id", "role": "mechanism|workflow|concept|case_context", "title": "标题", "after_section_id": "section id", "purpose": "帮助理解什么", "scene": "无文字画面与构图", "visual_mapping": [{"element": "画面元素", "meaning": "正文概念"}], "alt": "替代文本", "caption": "AI 概念示意，不是原始证据"}],
-  "source_media": [{"media_id": "登记媒体 id", "type": "image|video", "url": "登记媒体 URL", "poster_url": "可选", "caption": "自然中文图注", "language": "zh|en|其他语言代码", "reader_note": "外语素材必填的中文观看重点或读图提示", "translation_note": "可选中文化说明", "after_section_id": "section id", "source_url": "素材上游来源 URL"}],
+  "source_media": [{"media_id": "登记媒体 id", "type": "image|video", "url": "登记媒体 URL", "poster_url": "可选", "caption": "自然中文图注，说明画面是什么", "purpose": "它解释正文中的哪个具体概念、动作、案例或结果", "language": "zh|en|其他语言代码", "reader_note": "读者具体看哪里，以及这能帮助理解什么；外语素材必须用中文", "translation_note": "可选中文化说明", "after_section_id": "section id", "source_url": "素材上游来源 URL"}],
   "media_omissions": [{"media_id": "未采用的重要视频 id", "reason": "具体省略理由"}],
   "listening_cards": [{"id": "ASCII id", "title": "试听标题", "intro": "选择依据", "after_section_id": "section id", "boundary": "样曲证据边界", "tracks": [{"media_id": "audio 媒体 id", "label": "曲目标签", "prompt": "真实提示词", "lyrics_excerpt": "可选摘录", "listening_points": ["具体听感"]}]}],
   "number_stories": [{"id": "ASCII id", "title": "数字回答的问题", "value": "主数字", "unit": "单位", "denominator": "分母、样本或计时口径", "scope": "适用范围", "period": "时间口径", "baseline": "对照", "change": "变化", "boundary": "不能推出什么", "display_variant": "compact|expanded，默认 compact", "display_note": "紧凑展示的一句自然口径说明", "labels": {"denominator": "统计对象或计时口径", "scope": "适用场景", "period": "统计时间", "baseline": "对照情况", "change": "结果变化", "boundary": "这个数字不能说明什么"}, "source_url": "登记来源 URL", "source_asset_ids": ["媒体 id"], "claim_ids": ["metric claim id"], "after_section_id": "section id", "importance": "high|medium|low"}],
@@ -185,7 +187,7 @@ FULL_SYSTEM_PROMPT = _COMMON_MODE_RULES + _FULL_VOICE_GUIDE + """
 - flow.presentation=stepper 只接受3至7个完整对象步骤，每步必须有 label、title、description，可选 result，并提供 caption；普通 static 流程仍可用文字步骤。互动必须帮助读者聚焦复杂阶段，不能为了减少首屏文字把关键事实默认隐藏。
 - timeline.presentation=scrubber 只接受3至8个完整时间节点，每个节点必须有 time、title、description，并提供 caption；无脚本时静态展开所有节点。只有拖动节点能帮助理解阶段变化时才使用，日期清单继续使用 static。
 - layer_stack 只用于真实存在的层级或上下游依赖，包含2至7层；每层必须有 label、title、description，caption 说明层级依据与不能推出的结论。时间先后用 flow 或 timeline，平级比较用 compare_table，不能为追求样式多元错判关系。
-- 同一章节通常只放一个承担解释任务的主视觉；来源图片、音频或视频可作为证据补充。不要连续使用三个相同结构的组件，也不要让视觉复述紧邻正文。matrix 超过6行、4列或24个单元格时，只有“逐格查数”本身是阅读任务才保留，否则拆分或改用分层、指标切换。
+- 同一章节通常只放一个承担解释任务的主视觉；来源图片、音频或视频可作为证据补充。每个 source_media 必须写清 purpose、after_section_id 和 reader_note，说明它解释什么、为什么放在这里、读者看哪里；中文媒体同样需要自然的观看重点，不得只写“配图”。不要连续使用三个相同结构的组件，也不要让视觉复述紧邻正文。matrix 超过6行、4列或24个单元格时，只有“逐格查数”本身是阅读任务才保留，否则拆分或改用分层、指标切换。
 - 优先从内容本身提取视觉结构：提示词含真实时间段时可做分镜 `timeline.scrubber`；多份参考素材被明确分配给场景、人物、区域或声音时可做紧凑分组或可展开 `layer_stack`；不同官方来源对同一能力说法冲突时可做带来源列的紧凑 `compare_table`。这些组件已回答问题时，删除复述同一信息的通用能力矩阵与公开数字卡。
 - scenario_calculator 至少包含 2 个 tabs、每个 tab 至少 1 个有来源的指标、合法 slider 与 result.base，并登记 source_asset_ids。滑块值是用户假设而非证据；若多个数值不属于同一平台、样本或时间口径，必须在指标 note、formula_note 和 caption 中明确说明。
 - capacity_curve 包含3至5个 position 严格递增的定性状态，每项写 label、result 和语义 tone；不得把示意滑块伪装成精确预测器，caption 必须说明转折点随条件变化。
@@ -196,7 +198,7 @@ FULL_SYSTEM_PROMPT = _COMMON_MODE_RULES + _FULL_VOICE_GUIDE + """
 - further_reading 的 title 使用准确、自然的中文标题，必要时保留论文、模型、机构或产品的官方专名；不能直接把一串英文标题端给中文读者，也不能为了中文化改变原题含义。
 - site_note 是发布页“本站说明”，只用 1-2 句交代会改变读者判断的来源属性与证据边界；不写“本次读取了、核查了、抓取了”等工作过程。完整审计仍放在 `research_ledger`、`fact_check`、`source_notes` 和 `editorial_quality`，这些字段只供内部运行时追溯，禁止渲染到 HTML 或来源区。
 - illustration_plan 只选 1-2 个需要空间、材质、尺度、氛围或确实难以代码化的机制与案例环境；流程、层级、时间、对比和因果关系改用 HTML/CSS 组件。已有来源图、官方视频或代码化视觉足够时留空。不得规划跑分图、产品截图、真实人物或案例结果，不得要求图中生成文字、数字、Logo 或 UI；caption 必须明确“AI 概念示意，不是原始证据”。
-- source_media 只能使用输入中登记的来源媒体，不得编造图片或视频 URL；不相关的装饰图不要使用。
+- source_media 只能使用输入中登记的来源媒体，不得编造图片或视频 URL；每段媒体都必须有解释增量，能让读者看见正文文字无法同样快表达的画面、过程、尺度、前后差异或原始证据；不相关的装饰图不要使用。
 - 外语 source_media 必须同时提供中文 caption 和中文 reader_note；翻译、字幕和画面说明只能依据实际读取内容，不得脑补。
 - media_omissions 必须覆盖所有未进入 source_media 的重要演示或首屏视频，并给出具体理由；已经采用的媒体不得同时列为省略。
 - high 且 claim_kind=metric 的研究主张必须生成 number_stories；完整写清主数字、单位、分母、时间、对照或变化、范围、边界与登记来源。任一口径未知时如实写未知，并在正文解释；“未知”不算完整，不得为了生成大数字卡自行补齐。
@@ -306,6 +308,8 @@ def _editorial_review_prompt_for_modes(required_modes: tuple[str, ...]) -> str:
 - 逐一检查非空 transition_hook：只能追问本节自然留下的问题，下一节必须立即回答；全文通常保留 3-5 处。下一标题可压缩重述，但删掉逐字重复、空悬念和末节未收束的问题。
 - 把 narrative_plan 当作内部阅读契约检查：开头承诺、正文主链和读后判断必须一致；每节只完成一个主要任务并增加新信息，能删掉而不削弱中心论证的段落应删除。
 - 检查结构变化：相邻章节不要重复同一种开场动作，三个以上章节不要共享完全相同的内部骨架；不得为求变化虚构故事或场景。
+- 检查是否存在一条清楚的钉子判断，并能在至少两个不同场景中得到兑现；如果判断只在标题或速览出现、正文没有动作和证据承接，改写或删除。
+- 逐段检查抽象规则之后是否紧跟具体动作、画面或选择；连续出现比例、目录、脚本和术语而没有场景落点时，拆段、补例子或删减。
 - 脱离标题、摘要、提纲和来源说明冷读正文，确认它自身能说清中心、关键支撑和最终完成的结果或选择；把最后两段分别删掉试读，删后更有力就提前结束。
 - 朋友感是平等、诚实和具体，不是频繁使用“你”、网络热词、感叹号或故作轻松。所有风格修订必须在 revised_article 中真正落地。
 - 先准确复述最合理的异议和读者处境，再回应新增条件；没有真实异议时不要虚构“你可能会觉得”。检查段段金句、匀速排比、固定连接词、假脆弱、假故事、材料不支持的第一人称体验和强行哲学升华。允许节奏有自然毛边，但语病和事实漏洞必须修复。
@@ -350,6 +354,7 @@ def _editorial_review_prompt_for_modes(required_modes: tuple[str, ...]) -> str:
 - importance=high 的 claim 必须被覆盖或明确说明舍弃原因。
 - 不得新增研究账本和草稿中没有的事实、URL、数字、产品、价格或日期。
 - 逐一复核登记的重要视频和图片：只保留有信息增量的素材；外语媒体必须补准确中文图注与中文观看重点/读图提示，不得编造字幕或画面。
+- 逐一复核登记的重要视频和图片：每段都要有明确的 purpose、对应章节和观看重点，说明它具体解释了什么、读者看哪里、为什么文字或其他视觉无法等价替代；没有解释增量的素材省略，不因原网页存在或页面更丰富而保留。
 - 复核媒体是否形成能力覆盖组合：首屏锚点、代表性案例、机制操作和前后差异等不同角色不要被“一段代表全部”替代；原文有真实提示词、时间码、参考分工、代际基线或平台状态时，补成紧凑可读组件，不把长原文整段塞进正文。
 - 不得提升来源证据等级；限制、反例和 unknowns 不得丢失。
 - 删除重复表达，保持事实、数字和比较口径一致。

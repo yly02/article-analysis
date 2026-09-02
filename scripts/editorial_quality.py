@@ -1374,6 +1374,13 @@ def audit_distilled(
                 or not re.search(r"[\u3400-\u9fff]", _text(item.get("reader_note")))
             )
         ]
+        media_explanation_gaps = [
+            _text(item.get("media_id")) or str(i + 1)
+            for i, item in enumerate(source_media)
+            if not _text(item.get("purpose"))
+            or not _text(item.get("reader_note"))
+            or len(_text(item.get("reader_note"))) < 8
+        ]
         media_policy = distilled.get("media_policy") if isinstance(distilled.get("media_policy"), dict) else {}
         media_discovery = media_policy.get("discovery") if isinstance(media_policy.get("discovery"), dict) else {}
         media_discovery_status = _text(media_discovery.get("status")).lower()
@@ -1603,6 +1610,7 @@ def audit_distilled(
             "unregistered_source_media": unregistered_media,
             "duplicate_source_media_urls": duplicate_media_urls,
             "foreign_media_without_chinese_guidance": foreign_media_without_guidance,
+            "media_explanation_gaps": media_explanation_gaps,
             "available_demo_video_count": len(available_demo_video_ids),
             "used_source_video_count": len(used_video_ids),
             "media_omission_count": len(media_omissions),
@@ -1757,6 +1765,11 @@ def audit_distilled(
             blockers.append(
                 "外语媒体必须提供自然中文图注和观看重点/读图提示："
                 f"{foreign_media_without_guidance}"
+            )
+        if media_explanation_gaps:
+            warnings.append(
+                "部分正文媒体缺少解释任务或具体观看重点；新稿应说明媒体帮助读者理解什么："
+                f"{media_explanation_gaps}"
             )
         if invalid_media_omission_indexes:
             blockers.append(

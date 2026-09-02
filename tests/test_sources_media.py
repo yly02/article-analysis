@@ -660,6 +660,54 @@ def test_media_registration_gate_and_rendering():
     assert "https://attacker.example/fake.jpg" not in render_html(article, normalized_invalid)
 
 
+def test_media_explanation_contract_is_audited_without_breaking_legacy_payloads():
+    article = Article(
+        url="https://vendor.example/blog/launch",
+        title="Launch",
+        text="原文",
+        source_links=[],
+        media_assets=[{
+            "id": "media-1",
+            "type": "image",
+            "url": "https://cdn.example/diagram.png",
+            "poster_url": "",
+            "alt": "Workflow diagram",
+            "source_url": "https://vendor.example/blog/launch",
+            "source_type": "original_media",
+            "extracted": True,
+        }],
+    )
+    payload = _full_payload()
+    payload["source_media"] = [{
+        "media_id": "media-1",
+        "type": "image",
+        "url": "https://cdn.example/diagram.png",
+        "caption": "工作流示意图",
+        "after_section_id": "demo",
+    }]
+    normalized = normalize_distilled(payload, article)
+    audit = audit_distilled(normalized, {}, ("full",), strict_editorial=True)
+
+    # 老稿可以继续发布，但审校结果必须明确指出媒体没有解释任务/观看重点。
+    assert audit["publishable"], audit
+    assert audit["metrics"]["media_explanation_gaps"] == ["media-1"]
+    assert "解释任务或具体观看重点" in str(audit["warnings"])
+
+    complete = _full_payload()
+    complete["source_media"] = [{
+        "media_id": "media-1",
+        "type": "image",
+        "url": "https://cdn.example/diagram.png",
+        "caption": "工作流示意图",
+        "purpose": "解释请求如何经过排队、执行和回传三个阶段",
+        "reader_note": "重点看三段箭头的先后关系，这能帮助理解任务为什么会在执行前排队。",
+        "after_section_id": "demo",
+    }]
+    complete_normalized = normalize_distilled(complete, article)
+    complete_audit = audit_distilled(complete_normalized, {}, ("full",), strict_editorial=True)
+    assert complete_audit["metrics"]["media_explanation_gaps"] == []
+
+
 def test_publish_audit_blocks_when_demo_videos_are_ignored():
     article = Article(
         url="https://vendor.example/blog/launch",
@@ -741,6 +789,7 @@ if __name__ == "__main__":
     test_dynamic_media_discovery_is_automatic_and_failure_is_explicit()
     test_completed_page_assets_skip_sessionless_browser_discovery()
     test_media_registration_gate_and_rendering()
+    test_media_explanation_contract_is_audited_without_breaking_legacy_payloads()
     test_publish_audit_blocks_when_demo_videos_are_ignored()
     test_foreign_media_requires_chinese_guidance_without_exposing_internal_notes()
     print("source and media tests passed")
