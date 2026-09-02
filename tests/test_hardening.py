@@ -270,8 +270,11 @@ def test_public_render_hides_audit_ids_and_respects_visual_anchor():
     assert '<details class="experiment-block"' in html
     assert "证据锚点" not in html
     assert ">exp-quality<" not in html
-    assert html.count('class="art-annotation-label"') >= 3
-    assert "名词解释" in html and "通俗理解" in html
+    # Concept explainers are compact term popovers in the public page rather
+    # than standalone annotation cards; only analogies use the annotation
+    # label class.
+    assert html.count('class="art-annotation-label"') >= 1
+    assert 'data-term-popover-toggle' in html and "通俗理解" in html
     assert "原文引文" in html and "英文原句" in html and "中文释义" in html
     assert "<p>第一段。</p><p>第二个自然段。</p>" in html
     assert 'data-interactive-compare' in html
@@ -328,6 +331,29 @@ def test_term_marker_follows_inline_translation():
     rendered = render_html(article, distilled)
     assert 'feature flag（功能开关）<sup class="term-marker-wrap"' in rendered
     assert 'feature flag<sup class="term-marker-wrap"' not in rendered
+
+
+def test_renderer_hides_audit_explanations_from_public_html():
+    article = article_from_text("正文", url="https://example.com/a", title="来源")
+    distilled = {
+        "distilled_title": "前端不泄露审计信息",
+        "one_liner": "一句面向读者的摘要。",
+        "sections": [{"id": "s1", "title": "正文", "content": "这是一段足够长的文章正文，用来测试来源区是否只保留读者需要的信息。"}],
+        "site_note": "这篇文章主要依据项目公开说明，读者可据此理解其定位与边界。",
+        "source_notes": "内部审计：抓取完成，媒体对账通过，cross_checked=0。",
+        "fact_check": [{
+            "claim": "内部主张",
+            "verdict": "原文声称",
+            "evidence": [{"url": "https://audit.example/check", "publisher": "内部检查", "source_type": "unverified_link"}],
+        }],
+        "editorial_quality": {"final_audit": {"publishable": True, "score": 99}},
+    }
+    rendered = render_html(article, distilled)
+    assert "这篇文章主要依据项目公开说明" in rendered
+    assert "内部审计" not in rendered
+    assert "媒体对账通过" not in rendered
+    assert "cross_checked" not in rendered
+    assert "audit.example" not in rendered
 
 
 class FakeCompletions:

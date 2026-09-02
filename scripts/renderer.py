@@ -832,14 +832,14 @@ html { scroll-behavior:smooth; }
 .number-compare-value { color:var(--ink); font-size:12.5px; line-height:1.55; overflow-wrap:anywhere; }
 .number-compare-arrow { display:block; height:22px; color:var(--accent); font-size:17px; font-weight:800; line-height:22px; text-align:center; }
 .number-boundary { margin-top:10px; padding:8px 10px; border-left:3px solid var(--warn); background:var(--warn-soft); color:var(--sub); font-size:12px; line-height:1.6; }
-.number-story.compact { padding:0; overflow:hidden; }
-.number-compact-head { display:grid; grid-template-columns:minmax(170px,auto) minmax(0,1fr); gap:0; align-items:stretch; }
-.number-story.compact .number-main { display:flex; align-items:center; padding:20px 18px; background:var(--ink); color:var(--card); }
-.number-story.compact .number-main small { color:color-mix(in srgb,var(--card) 72%,transparent); }
-.number-story.compact .number-detail { margin-top:0; padding:17px 18px; align-self:center; }
-.number-story.compact .number-title { margin:0 0 4px; }
-.number-compact-meta { color:var(--sub); font-size:11.5px; line-height:1.55; }
-.number-story.compact .number-boundary { margin:0; padding:10px 18px 11px; border:0; border-top:1px solid var(--line); background:var(--warn-soft); }
+.number-story.compact { margin:16px 0; padding:10px 14px; overflow:hidden; border-left:3px solid var(--metric-primary); border-radius:4px; }
+.number-compact-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 16px; }
+.number-story.compact .number-main { display:inline-flex; align-items:baseline; padding:0; background:transparent; color:var(--metric-primary); border-left:0; font-size:22px; line-height:1.15; }
+.number-story.compact .number-main small { color:var(--sub); font-size:11px; }
+.number-story.compact .number-detail { margin:0; padding:0; align-self:auto; }
+.number-story.compact .number-title { display:inline; margin:0 8px 0 0; font-size:12.5px; }
+.number-compact-meta { display:inline; color:var(--sub); font-size:11px; line-height:1.5; }
+.number-story.compact .number-boundary { margin:6px 0 0; padding:5px 0 0; border:0; border-top:1px dashed var(--line); background:transparent; font-size:11px; }
 .listening-card { margin:24px 0 28px; border:1px solid var(--line); border-radius:6px; background:var(--card); overflow:hidden; }
 .listening-head { padding:16px 18px 12px; border-bottom:1px solid var(--line); }
 .listening-title { margin:0; color:var(--ink); font-size:16px; line-height:1.45; }
@@ -872,9 +872,9 @@ html { scroll-behavior:smooth; }
 @media (max-width:560px) {
   .number-main { font-size:28px; }
   .number-compact-head { grid-template-columns:1fr; }
-  .number-story.compact .number-main { min-height:68px; padding:15px 16px; }
-  .number-story.compact .number-detail { padding:14px 16px; }
-  .number-story.compact .number-boundary { padding:9px 16px 10px; }
+  .number-story.compact .number-main { min-height:0; padding:0; }
+  .number-story.compact .number-detail { padding:0; }
+  .number-story.compact .number-boundary { padding:5px 0 0; }
   .comparison-list.paired .comparison-pairs { grid-template-columns:1fr; }
   .comparison-list.paired .comparison-pair + .comparison-pair { margin-top:0; }
   .cmp-table { font-size:12px; }
@@ -992,7 +992,13 @@ def _render_source_panel(
     source_note: str,
     fact_check: list,
 ) -> str:
-    """Render reader-facing provenance as a compact editorial footer."""
+    """Render only reader-facing provenance as a compact editorial footer.
+
+    ``fact_check`` and ``source_notes`` are retained in the data model for
+    internal audit and traceability, but must never be promoted into the
+    public page.  ``source_note`` is supplied only from the reader-facing
+    ``site_note``/bias fields by ``render_html``.
+    """
     primary_title = _esc(article.title or "主材料")
     meta = []
     if article.author:
@@ -1014,14 +1020,9 @@ def _render_source_panel(
 
     links = []
     seen_urls = {str(article.url or "").rstrip("/")}
+    # Do not fall back to fact_check evidence here.  Those records can contain
+    # unverified links and audit-only notes that are not meant for readers.
     candidates = list(further_reading or [])
-    if not candidates:
-        for item in fact_check or []:
-            for evidence in item.get("evidence") or []:
-                candidates.append({
-                    "title": evidence.get("title") or evidence.get("publisher") or "延伸材料",
-                    "url": evidence.get("url") or "",
-                })
     for item in candidates:
         if not isinstance(item, dict):
             continue
@@ -2481,7 +2482,10 @@ def render_html(article: Article, distilled: dict) -> str:
     source_panel_html = _render_source_panel(
         article,
         further_reading,
-        site_note or source_notes or source_bias,
+        # source_notes/fact_check/editorial_quality are audit-only.  The page
+        # may show a short site_note or a natural bias note, never the audit
+        # explanation or quality report itself.
+        site_note or source_bias,
         fact_check,
     )
 
